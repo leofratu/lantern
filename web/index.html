@@ -96,6 +96,113 @@
               ><small id="control-detail">Connect a supported gateway</small>
             </div>
           </div>
+          <section class="traffic-overview" aria-labelledby="traffic-heading">
+            <div class="traffic-heading">
+              <div>
+                <h2 id="traffic-heading">Network traffic</h2>
+                <p>Gateway WAN counters and sampled activity</p>
+              </div>
+              <div class="traffic-controls">
+                <label
+                  >WAN interface
+                  <select id="traffic-interface" aria-label="WAN interface">
+                    <option value="">Waiting for router data</option>
+                  </select></label
+                ><button class="secondary" id="traffic-refresh">
+                  Refresh traffic
+                </button>
+              </div>
+            </div>
+            <p
+              class="traffic-status"
+              id="traffic-status"
+              role="status"
+              aria-live="polite"
+            >
+              Connect a gateway to see network traffic.
+            </p>
+            <div class="traffic-metrics">
+              <div>
+                <span>↓ Download now</span
+                ><strong id="traffic-download">—</strong
+                ><small id="traffic-download-capacity"
+                  >Plan speed not set</small
+                >
+                <div class="traffic-meter">
+                  <i id="traffic-download-meter"></i>
+                </div>
+              </div>
+              <div>
+                <span>↑ Upload now</span><strong id="traffic-upload">—</strong
+                ><small id="traffic-upload-capacity">Plan speed not set</small>
+                <div class="traffic-meter">
+                  <i id="traffic-upload-meter"></i>
+                </div>
+              </div>
+              <div>
+                <span>Total downloaded</span
+                ><strong id="traffic-down-total">—</strong
+                ><small>Since counter reset</small>
+              </div>
+              <div>
+                <span>Total uploaded</span
+                ><strong id="traffic-up-total">—</strong
+                ><small>Since counter reset</small>
+              </div>
+            </div>
+            <div class="traffic-chart">
+              <div class="traffic-chart-label">
+                <strong>Recent activity</strong
+                ><span
+                  ><i class="download-key"></i> Download &nbsp;
+                  <i class="upload-key"></i> Upload</span
+                >
+              </div>
+              <svg
+                id="traffic-graph"
+                viewBox="0 0 600 80"
+                preserveAspectRatio="none"
+                role="img"
+                aria-label="Recent download and upload rates"
+              ></svg
+              ><small id="traffic-chart-note"
+                >Rates appear after two samples.</small
+              >
+            </div>
+            <details class="traffic-settings">
+              <summary>Compare with your plan speed</summary>
+              <p>
+                Enter advertised speeds to compare usage. These values are not
+                measured by the router.
+              </p>
+              <div class="traffic-plan">
+                <label
+                  >Download · Mbps
+                  <input
+                    id="traffic-plan-down"
+                    type="number"
+                    min="0.001"
+                    max="1000000"
+                    step="any"
+                    placeholder="Optional" /></label
+                ><label
+                  >Upload · Mbps
+                  <input
+                    id="traffic-plan-up"
+                    type="number"
+                    min="0.001"
+                    max="1000000"
+                    step="any"
+                    placeholder="Optional"
+                /></label>
+              </div>
+            </details>
+            <p class="traffic-footnote">
+              Totals are router interface counters, not a billing-period quota.
+              WAN interfaces can include TV or management traffic; select the
+              internet interface. Counters can reset or wrap.
+            </p>
+          </section>
           <div class="section-heading">
             <div>
               <h2>Devices</h2>

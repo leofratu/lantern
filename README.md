@@ -5,7 +5,7 @@
 <h1 align="center">Your network, in one local workspace.</h1>
 
 <p align="center">
-  Identify devices. Manage router access. Set app bandwidth limits.<br>
+  Monitor traffic. Identify devices. Manage access. Set app bandwidth limits.<br>
   Free software that runs on your computer, in your existing browser.
 </p>
 
@@ -216,6 +216,12 @@ Lantern combines observations instead of treating a hostname as an authenticated
 
 Connect and refresh inspect up to 32 observed devices, four at a time, with a five-second budget per device. Results are cached for ten minutes within the session and retained only when MAC, IP, and router name still match. **Inspect device again** requests a fresh observation. Sleeping devices and devices exposing little metadata can remain unidentified.
 
+## Network traffic
+
+The network overview reads the gateway's WAN interface byte and packet-error counters and calculates upload and download rates between successive samples. It shows interface totals, recent sampled activity, and optional utilization against plan speeds entered in the page. Plan speeds are user-supplied; the app does not discover your ISP subscription or billing allowance.
+
+Movistar exposes several WAN interfaces. Lantern initially suggests the interface with the highest observed byte total, labels that choice as a suggestion, and lets you select a different interface. Interfaces can include television or management traffic, so verify the chosen interface. OpenWrt uses the active `network.interface.wan` L3 device. Counters can reset or wrap; a decreasing counter clears the rate baseline instead of producing a false spike. Totals are not billing-period usage and may reset when the gateway or interface restarts.
+
 ## App bandwidth
 
 1. Create an **App bandwidth** profile with upload and download limits.
@@ -245,6 +251,7 @@ src/identity.rs      Targeted identification and offline manufacturer lookup
 src/discovery.rs     Platform neighbor-cache discovery
 src/reachability.rs  Bounded ICMP checks for observed private IPv4 devices
 src/limits.rs        OpenWrt device rate policies, ownership, and readback
+src/traffic.rs       WAN counter sampling and reset-safe rate calculation
 src/proxy.rs         SOCKS5 relay, shared pacing, connection lifecycle
 src/model.rs         Shared models and boundary validation
 web/                 TypeScript, generated JavaScript, local styles

@@ -26,6 +26,12 @@ let renderedEvents = "";
 let syncSequence = 0;
 let pingTarget = null;
 let limitTarget = null;
+let trafficSample = null;
+let trafficBusy = false;
+let trafficCompletion = Promise.resolve();
+let trafficSuggested = false;
+let trafficGateway = "";
+let trafficHistory = [];
 async function api(path, method = "GET", data) {
     let response;
     try {
@@ -78,6 +84,8 @@ async function operation(work) {
     });
     notice("Working… waiting for the local service and gateway evidence.");
     try {
+        // Avoid logging in to the router for telemetry while an action is using it.
+        await trafficCompletion;
         const message = await work();
         try {
             await sync();
@@ -117,6 +125,20 @@ async function sync() {
     if (sequence !== syncSequence)
         return;
     snapshot = next;
+    const currentGateway = snapshot.gateway
+        ? `${snapshot.gateway.kind}:${snapshot.gateway.host}`
+        : "";
+    if (currentGateway !== trafficGateway) {
+        trafficGateway = currentGateway;
+        trafficSample = null;
+        trafficHistory = [];
+        el("traffic-interface").innerHTML =
+            '<option value="">Waiting for router data</option>';
+        if (currentGateway)
+            void refreshTraffic();
+        else
+            clearTraffic("Connect a gateway to see network traffic.");
+    }
     el("platform").textContent = `${snapshot.platform || "Local"} · Session only`;
     const gateway = snapshot.gateway;
     el("gateway-name").textContent = gateway
@@ -152,7 +174,170 @@ async function sync() {
     renderEvents();
     applyCapabilities();
 }
+function clearTraffic(message) {
+    el("traffic-status").textContent = message;
+    for (const id of [
+        "traffic-download",
+        "traffic-upload",
+        "traffic-down-total",
+        "traffic-up-total",
+    ])
+        el(id).textContent = "—";
+    for (const id of ["traffic-download-meter", "traffic-upload-meter"])
+        el(id).style.width = "0%";
+    for (const direction of ["download", "upload"]) {
+        const plan = Number(el(direction === "download" ? "traffic-plan-down" : "traffic-plan-up").value);
+        el(`traffic-${direction}-capacity`).textContent =
+            plan > 0 && plan <= 1_000_000
+                ? `${plan} Mbps plan · awaiting sample`
+                : "Plan speed not set";
+    }
+    el("traffic-graph").innerHTML = "";
+    el("traffic-chart-note").textContent = "Rates appear after two samples.";
+}
+function trafficRate(value) {
+    return value === null || !Number.isFinite(value)
+        ? "—"
+        : `${value.toFixed(value < 10 ? 2 : 1)} Mbps`;
+}
+function renderTraffic() {
+    const select = el("traffic-interface");
+    const current = trafficSample?.interfaces.find((item) => item.name === select.value);
+    if (!trafficSample || !current) {
+        clearTraffic("No WAN interface is available.");
+        return;
+    }
+    el("traffic-download").textContent = trafficRate(current.download_mbps);
+    el("traffic-upload").textContent = trafficRate(current.upload_mbps);
+    el("traffic-down-total").textContent = bytes(current.received_bytes);
+    el("traffic-up-total").textContent = bytes(current.transmitted_bytes);
+    const status = `Updated ${new Date(trafficSample.sampled_at * 1000).toLocaleTimeString()} · ${current.receive_errors ?? "—"} receive errors · ${current.transmit_errors ?? "—"} transmit errors`;
+    el("traffic-status").textContent = trafficSuggested
+        ? `${status} · Suggested interface has the highest observed byte total; verify your internet interface.`
+        : status;
+    for (const [direction, value] of [
+        ["download", current.download_mbps],
+        ["upload", current.upload_mbps],
+    ]) {
+        const plan = Number(el(direction === "download" ? "traffic-plan-down" : "traffic-plan-up").value);
+        const valid = Number.isFinite(plan) && plan > 0 && plan <= 1_000_000;
+        const percent = valid && value !== null ? (value / plan) * 100 : null;
+        el(`traffic-${direction}-capacity`).textContent = valid
+            ? percent === null
+                ? `${plan} Mbps plan · collecting rate`
+                : `${percent.toFixed(1)}% of ${plan} Mbps plan`
+            : "Plan speed not set";
+        el(`traffic-${direction}-meter`).style.width =
+            percent === null ? "0%" : `${Math.min(100, Math.max(0, percent))}%`;
+    }
+    const graph = document.querySelector("#traffic-graph");
+    if (!graph)
+        return;
+    if (!trafficHistory.length) {
+        graph.innerHTML = "";
+        el("traffic-chart-note").textContent = "Rates appear after two samples.";
+        return;
+    }
+    const max = Math.max(0.1, ...trafficHistory.flatMap((sample) => [sample.down, sample.up]));
+    const points = (key) => trafficHistory
+        .map((sample, index) => `${((index * 600) / Math.max(1, trafficHistory.length - 1)).toFixed(1)},${(76 - (sample[key] / max) * 70).toFixed(1)}`)
+        .join(" ");
+    graph.innerHTML = `<line x1="0" y1="76" x2="600" y2="76" class="traffic-grid"/><polyline points="${points("down")}" class="traffic-line down"/><polyline points="${points("up")}" class="traffic-line up"/>`;
+    el("traffic-chart-note").textContent =
+        `Last ${trafficHistory.length} sampled rates · graph scale ${trafficRate(max)}`;
+}
+async function refreshTraffic() {
+    if (trafficBusy ||
+        !snapshot.gateway ||
+        document.hidden ||
+        el("network-page").hidden)
+        return;
+    const gateway = trafficGateway;
+    trafficBusy = true;
+    let finishTraffic = () => { };
+    trafficCompletion = new Promise((resolve) => {
+        finishTraffic = resolve;
+    });
+    el("traffic-refresh").disabled = true;
+    if (!trafficSample)
+        el("traffic-status").textContent = "Reading gateway traffic counters…";
+    try {
+        const result = await api("network/traffic", "POST", {});
+        if (gateway !== trafficGateway)
+            return;
+        const select = el("traffic-interface");
+        const previous = select.value;
+        const names = result.interfaces.map((item) => item.name);
+        if (!names.includes(previous)) {
+            const suggested = result.interfaces.reduce((best, item) => item.received_bytes + item.transmitted_bytes >
+                best.received_bytes + best.transmitted_bytes
+                ? item
+                : best);
+            select.innerHTML = result.interfaces
+                .map((item) => `<option value="${escape(item.name)}">${escape(item.name)}</option>`)
+                .join("");
+            select.value = suggested.name;
+            trafficSuggested = result.interfaces.length > 1;
+            trafficHistory = [];
+        }
+        else if (names.join("\0") !==
+            Array.from(select.options)
+                .map((option) => option.value)
+                .join("\0")) {
+            select.innerHTML = result.interfaces
+                .map((item) => `<option value="${escape(item.name)}">${escape(item.name)}</option>`)
+                .join("");
+            select.value = previous;
+        }
+        trafficSample = result;
+        const current = result.interfaces.find((item) => item.name === select.value);
+        if (current &&
+            current.download_mbps !== null &&
+            current.upload_mbps !== null) {
+            trafficHistory.push({
+                down: current.download_mbps,
+                up: current.upload_mbps,
+            });
+            if (trafficHistory.length > 20)
+                trafficHistory.shift();
+        }
+        else
+            trafficHistory = [];
+        renderTraffic();
+    }
+    catch (error) {
+        if (gateway === trafficGateway) {
+            trafficHistory = [];
+            trafficSample = null;
+            clearTraffic(error instanceof Error
+                ? `Traffic unavailable: ${error.message}`
+                : "Traffic unavailable.");
+        }
+    }
+    finally {
+        trafficBusy = false;
+        finishTraffic();
+        el("traffic-refresh").disabled =
+            busy || !snapshot.gateway;
+    }
+}
+el("traffic-refresh").addEventListener("click", () => {
+    void refreshTraffic();
+});
+el("traffic-interface").addEventListener("change", () => {
+    trafficSuggested = false;
+    trafficHistory = [];
+    renderTraffic();
+});
+for (const id of ["traffic-plan-down", "traffic-plan-up"])
+    el(id).addEventListener("input", renderTraffic);
+setInterval(() => {
+    if (!busy)
+        void refreshTraffic();
+}, 10_000);
 function applyCapabilities() {
+    el("traffic-refresh").disabled =
+        busy || trafficBusy || !snapshot.gateway;
     el("inspect-rules").disabled =
         busy ||
             !snapshot.gateway ||

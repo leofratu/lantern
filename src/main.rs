@@ -6,6 +6,7 @@ mod movistar_cli;
 mod proxy;
 mod reachability;
 mod router;
+mod traffic;
 
 use axum::{
     Json, Router,
@@ -42,6 +43,8 @@ struct App {
     router_info: Mutex<Value>,
     access_policy: Mutex<Value>,
     speed_limits: Mutex<Value>,
+    traffic_gate: Mutex<()>,
+    traffic_history: Mutex<traffic::History>,
 }
 
 struct ApiError(String);
@@ -160,6 +163,7 @@ async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) 
                 None
             };
             *app.config.lock().await = Some(config);
+            app.traffic_history.lock().await.reset();
             *app.router_info.lock().await = Value::Null;
             *app.access_policy.lock().await = Value::Null;
             *app.speed_limits.lock().await = speed.unwrap_or(Value::Null);
@@ -227,6 +231,7 @@ async fn disconnect(State(app): State<Arc<App>>) -> ApiResult {
         .try_lock()
         .map_err(|_| ApiError("Another operation is in progress".into()))?;
     *app.config.lock().await = None;
+    app.traffic_history.lock().await.reset();
     *app.router_info.lock().await = Value::Null;
     *app.access_policy.lock().await = Value::Null;
     *app.speed_limits.lock().await = Value::Null;
@@ -371,6 +376,26 @@ async fn access_status(State(app): State<Arc<App>>) -> ApiResult {
     app.cache_policy(policy).await;
     Ok(Json(
         json!({"message":"Ban status refreshed from the router."}),
+    ))
+}
+
+async fn network_traffic(State(app): State<Arc<App>>) -> ApiResult {
+    let _guard = app
+        .traffic_gate
+        .try_lock()
+        .map_err(|_| ApiError("A network traffic sample is already running".into()))?;
+    let generation = app.traffic_history.lock().await.generation;
+    let config = app.configured().await?;
+    let counters = traffic::read(&config).await?;
+    let mut history = app.traffic_history.lock().await;
+    if history.generation != generation {
+        return Err(ApiError(
+            "Gateway changed while reading network traffic; refresh the overview".into(),
+        ));
+    }
+    let interfaces = history.sample(counters, std::time::Instant::now());
+    Ok(Json(
+        json!({"interfaces":interfaces,"sampled_at":SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |value|value.as_secs())}),
     ))
 }
 
@@ -758,6 +783,7 @@ fn routes(app: Arc<App>) -> Router {
         .route("/api/router/cli/status", post(cli_status))
         .route("/api/rules", post(rules))
         .route("/api/access", post(access_status))
+        .route("/api/network/traffic", post(network_traffic))
         .route("/api/limits", post(limit_status))
         .route("/api/device/limit", post(set_limit))
         .route("/api/profiles", post(add_profile))
@@ -820,6 +846,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         router_info: Mutex::new(Value::Null),
         access_policy: Mutex::new(Value::Null),
         speed_limits: Mutex::new(Value::Null),
+        traffic_gate: Mutex::new(()),
+        traffic_history: Mutex::new(traffic::History::default()),
     });
     println!(
         "Lantern 0.1.0 — {url}\nNo gateway connected. No network changes made. Ctrl+C to quit."

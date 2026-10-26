@@ -68,6 +68,7 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(self.request("/api/router/cli/status", "POST")[0],400)
         self.assertEqual(self.request("/api/access", "POST")[0],400)
         self.assertEqual(self.request("/api/limits", "POST")[0],400)
+        self.assertEqual(self.request("/api/network/traffic", "POST")[0],400)
         self.assertEqual(self.request("/api/device/limit", "POST", {"mac":"02:aa:bb:cc:dd:ee","up_kbps":63,"down_kbps":1000})[0],400)
 
     def test_profile_lifecycle_uses_real_handler_responses(self):

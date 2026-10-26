@@ -182,3 +182,194 @@ dialog {
     font-size: 16px;
   }
 }
+
+.traffic-overview {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 9px;
+  padding: 24px;
+  margin-bottom: 32px;
+}
+.traffic-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.traffic-heading h2 {
+  font-size: 18px;
+  margin: 0 0 5px;
+}
+.traffic-heading p,
+.traffic-status,
+.traffic-footnote,
+.traffic-settings p {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.6;
+}
+.traffic-controls {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.traffic-controls label,
+.traffic-plan label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.traffic-controls select,
+.traffic-plan input {
+  display: block;
+  border: 1px solid #cbd9e2;
+  border-radius: 6px;
+  padding: 9px 10px;
+  margin-top: 5px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  min-width: 110px;
+}
+.traffic-controls button {
+  font-size: 11px;
+  padding: 10px 13px;
+}
+.traffic-status {
+  margin-top: 18px;
+  overflow-wrap: anywhere;
+}
+.traffic-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+.traffic-metrics > div {
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.traffic-metrics span,
+.traffic-metrics small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.traffic-metrics strong {
+  display: block;
+  font-size: 21px;
+  font-weight: 600;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.traffic-meter {
+  height: 4px;
+  background: #e7eff1;
+  border-radius: 4px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.traffic-meter i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: #3d918c;
+  transition: width 0.2s;
+}
+.traffic-chart {
+  margin-top: 22px;
+  padding: 16px;
+  background: #f5f9fa;
+  border-radius: 6px;
+}
+.traffic-chart-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: #52717c;
+}
+.traffic-chart-label strong {
+  color: var(--ink);
+}
+.traffic-chart-label i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.download-key {
+  background: #318b82;
+}
+.upload-key {
+  background: #6f81be;
+}
+.traffic-chart svg {
+  display: block;
+  width: 100%;
+  height: 80px;
+  margin: 10px 0;
+}
+.traffic-grid {
+  stroke: #dce9ec;
+  stroke-width: 1;
+}
+.traffic-line {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.traffic-line.down {
+  stroke: #318b82;
+}
+.traffic-line.up {
+  stroke: #6f81be;
+}
+.traffic-chart small {
+  font-size: 10px;
+  color: var(--muted);
+}
+.traffic-settings {
+  margin-top: 20px;
+  font-size: 12px;
+}
+.traffic-settings summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.traffic-settings p {
+  margin: 9px 0;
+}
+.traffic-plan {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.traffic-plan input {
+  font-size: 12px;
+  width: 140px;
+}
+.traffic-footnote {
+  margin-top: 18px;
+}
+@media (max-width: 850px) {
+  .traffic-heading {
+    flex-wrap: wrap;
+  }
+  .traffic-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 480px) {
+  .traffic-overview {
+    padding: 18px;
+  }
+  .traffic-metrics strong {
+    font-size: 18px;
+  }
+  .traffic-chart-label {
+    flex-wrap: wrap;
+  }
+}

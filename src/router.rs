@@ -159,6 +159,11 @@ fn empty_form_post(client: &reqwest::Client, url: String) -> reqwest::RequestBui
         .body("")
 }
 
+pub async fn movistar_traffic(config: &RouterConfig) -> Result<String> {
+    let (client, base) = movistar_client(config).await?;
+    callback_xml(&client, &base, "cbGetStatistic", None, 20).await
+}
+
 pub async fn movistar_information(config: &RouterConfig) -> Result<Value> {
     let (client, base) = movistar_client(config).await?;
     let mut diagnostics = Vec::<String>::new();

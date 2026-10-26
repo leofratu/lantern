@@ -52,14 +52,15 @@ fn openwrt(config: &RouterConfig) -> Result<()> {
     Ok(())
 }
 
-fn interface_name(value: &str) -> Result<&str> {
+pub(crate) fn interface_name(value: &str) -> Result<&str> {
     if value.is_empty()
         || value.len() > 15
+        || matches!(value, "." | "..")
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
     {
-        return Err("Unsupported LAN interface name".into());
+        return Err("Unsupported gateway interface name".into());
     }
     Ok(value)
 }
@@ -417,5 +418,6 @@ mod tests {
             assert_eq!(input.validate().is_ok(), valid);
         }
         assert!(interface_name("br-lan;reboot").is_err());
+        assert!(interface_name("..").is_err());
     }
 }

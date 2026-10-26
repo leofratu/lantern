@@ -9,16 +9,16 @@ This file distinguishes automated checks, live router observations, and unverifi
 | Strict TypeScript type checking and compilation | macOS, TypeScript 5.9 | Passed |
 | Frontend formatting check | Prettier, source HTML/CSS/TypeScript/configuration | Passed |
 | Rust formatting and Clippy with warnings denied | Isolated Linux x86-64 runner | Passed |
-| Rust tests | Linux x86-64 | 13 passed |
+| Rust tests | Linux x86-64 | 14 passed |
 | Real-service API smoke tests | Linux x86-64 and optimized native Apple Silicon macOS executable | 3 passed on each |
 | Real nftables namespace integration | Isolated Linux user/network namespace | Passed |
 | Device rate-cap integration | Isolated Linux bridge, ingress/egress hooks, real Ethernet traffic | Passed |
 | Optimized native macOS build | Apple Silicon, Rust 1.91.1 | Passed |
 | Native Windows build | Windows host unreachable over SSH | Not performed |
 
-The Linux runs used a dedicated directory and one build job. Their output is retained locally in `blocking-validation.log`, `ping-validation.log`, and `rate-validation.log`, excluded from Git. The runner directory is removed after collecting results. No existing runner services or host firewall were modified.
+The Linux runs used a dedicated directory and one build job. Their output is retained locally in `blocking-validation.log`, `ping-validation.log`, `rate-validation.log`, and `traffic-validation.log`, excluded from Git. The runner directory is removed after collecting results. No existing runner services or host firewall were modified.
 
-The Rust suite covers identifier validation, platform neighbor parsing, identification boundaries, shared proxy pacing and real relay cancellation, the firmware's empty-POST contract, native deauthentication acknowledgements, strict blacklist parsing, scoped/idempotent policy planning, unrelated-entry preservation, and consecutive complete radio verification. Incomplete radio observations and intervening associations reset the verification streak.
+The Rust suite covers identifier validation, platform neighbor parsing, identification boundaries, shared proxy pacing and real relay cancellation, the firmware's empty-POST contract, native deauthentication acknowledgements, strict blacklist parsing, scoped/idempotent policy planning, unrelated-entry preservation, consecutive complete radio verification, and reset-safe WAN rate calculation. Incomplete radio observations and intervening associations reset the verification streak.
 
 The API suite uses actual handler responses and checks Host/Origin/token/CSP boundaries, invalid input, absence of implicit gateway configuration, identification boundaries, profile lifecycle, and explicit UDP rejection. It does not contact a router.
 
@@ -41,6 +41,8 @@ Hardware: Askey RTF8115VW REV5, firmware `ES_g14.17_RTF_TEF001_V9.17_V034`.
 Router policy readback is distinct from traffic measurement. No router reboot was performed, no Ethernet enforcement measurement was taken, and no client-side reconnect/packet trace was captured. Power-cycle durability and every forwarding/offload path remain unverified.
 
 ## Identification and interface checks
+
+The optimized macOS app read three WAN counter sets from the Movistar router's authenticated statistics callback. Two successive samples produced nonnegative upload/download rates; the interface selector changed the displayed totals, and optional plan-speed inputs updated utilization percentages. Test plan values were cleared afterward. The overview labels its busiest-interface suggestion and reports counters as since-reset values rather than billing usage. OpenWrt WAN telemetry follows its documented `network.interface.wan` L3 device but has not been exercised on a physical OpenWrt gateway.
 
 The device rows now expose Ban, Unban, Ping, and Speed limit actions. Ban status is read from the router and displayed as Banned, Not banned, or Unknown with a read timestamp. A dedicated refresh reads policy again; failure invalidates the cached status. OpenWrt status concerns Lantern forwarding rules, not every possible external router restriction.
 
