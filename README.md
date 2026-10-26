@@ -177,13 +177,19 @@ Configure key-based SSH access outside Lantern and verify the host key with your
 
 #### Device speed limits
 
-Choose **Speed limit** on a device row, set upload and download values in Mbps, and confirm. These are device rate caps on the OpenWrt LAN interface, separate from the local app proxies. They require the device's traffic to pass through OpenWrt, `ip-full` with JSON support, nftables with netdev ingress/egress support, and a kernel supporting both hooks. Lantern refuses to install caps while OpenWrt flow offloading is enabled or a flowtable is present; it does not change those global settings automatically.
+Choose **Speed & latency** on a device row, set upload and download values in Mbps, and confirm. These are device rate caps on the OpenWrt LAN interface, separate from the local app proxies. They require the device's traffic to pass through OpenWrt, `ip-full` with JSON support, nftables with netdev ingress/egress support, and a kernel supporting both hooks. Lantern refuses to install caps while OpenWrt flow offloading is enabled or a flowtable is present; it does not change those global settings automatically.
 
 The adapter resolves the device's directly connected route and verifies its current neighbor MAC before writing. It installs separate source-MAC ingress and destination-MAC egress rules in an owned `netdev lantern_rate_v1` table. Readback verifies the match, byte rate, 16 KiB burst, drop action, counters, hook, and device binding. Other device limits are preserved. IPv4 and IPv6 frames using the selected MAC share the corresponding directional budget.
 
 Excess packets are dropped above the budget. This is policing, not smooth queue shaping; packet bursts and TCP recovery affect observed transfer rates. Hardware/driver behavior and traffic that bypasses the selected interface still require physical validation. These runtime rules clear on gateway reboot.
 
-Use **Inspect speed limits** to read current caps and dropped-byte counters, edit values, or remove both directions. This also works after a device vanishes from inventory. If an altered rule prevents safe automatic editing, an administrator can inspect and delete only `table netdev lantern_rate_v1` to remove all Lantern device caps. Other router policies remain separate.
+Use **Inspect traffic controls** to read current caps and dropped-byte counters, edit values, or remove both directions. This also works after a device vanishes from inventory. If an altered rule prevents safe automatic editing, an administrator can inspect and delete only `table netdev lantern_rate_v1` to remove all Lantern device caps. Other router policies remain separate.
+
+#### Device latency
+
+In **Speed & latency**, set delay and optional jitter in milliseconds and apply them independently of speed caps. Lantern delays gateway-to-device packets, so a ping through that path should increase by approximately the configured delay; actual round-trip times vary. Traffic that bypasses this interface, including switched local traffic and offloaded flows, is unaffected. Changes last until removed or the gateway reboots.
+
+Latency requires an OpenWrt gateway in the traffic path with `ip-full`, `tc-full` with JSON support, and the kernel's `prio`, `netem`, and `flower` components. Flow offloading must be disabled. Lantern only installs its queue on a LAN interface with an unused `noqueue` root; it refuses to replace an existing queue such as SQM. Each interface supports up to 15 delayed devices. The queue holds at most 1,000 packets per device and may drop packets when full. **Inspect traffic controls** also lists delays and their queue counters, including devices absent from inventory. Lantern checks its ownership marker and reads back the settings before reporting success. Avoid simultaneous queue changes by another administrator; inspect gateway state if an operation reports an unknown outcome. The packet path was tested in isolated Linux namespaces; physical OpenWrt hardware has not yet been validated.
 
 <details>
 <summary><strong>Firewall behavior, rule lifetime, and recovery</strong></summary>
@@ -202,7 +208,7 @@ Wi-Fi disconnect uses authenticated `ubus hostapd.* del_client` calls, requests 
 
 ## Device identification
 
-Every device row has **Ban**, **Unban**, **Ping**, **Speed limit**, and **Details** controls. Ban/Unban require a supported gateway connection; device speed caps require OpenWrt. Access badges explicitly show **Banned**, **Not banned**, or **Unknown**, with a router-read timestamp. **Refresh ban status** reads current policy; OpenWrt status covers Lantern's forwarding rules, while Movistar status covers its native blacklist. Other router restrictions can still apply.
+Every device row has **Ban**, **Unban**, **Ping**, **Speed & latency**, and **Details** controls. Ban/Unban require a supported gateway connection; device speed and latency controls require OpenWrt. Access badges explicitly show **Banned**, **Not banned**, or **Unknown**, with a router-read timestamp. **Refresh ban status** reads current policy; OpenWrt status covers Lantern's forwarding rules, while Movistar status covers its native blacklist. Other router restrictions can still apply.
 
 Ping sends three ICMP requests from your computer and displays replies, packet loss, and round-trip times. A missing ICMP reply is not proof that the device is offline or blocked. Narrow windows keep controls beside each device instead of hiding them off-screen.
 

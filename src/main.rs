@@ -1,5 +1,6 @@
 mod discovery;
 mod identity;
+mod latency;
 mod limits;
 mod model;
 mod movistar_cli;
@@ -43,6 +44,7 @@ struct App {
     router_info: Mutex<Value>,
     access_policy: Mutex<Value>,
     speed_limits: Mutex<Value>,
+    latencies: Mutex<Value>,
     traffic_gate: Mutex<()>,
     traffic_history: Mutex<traffic::History>,
 }
@@ -138,7 +140,7 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
         views.push(profile.view().await);
     }
     Json(
-        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "speed_limits":app.speed_limits.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
+        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "speed_limits":app.speed_limits.lock().await.clone(), "latencies":app.latencies.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
     )
 }
 
@@ -162,11 +164,20 @@ async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) 
             } else {
                 None
             };
+            let delays = if matches!(config.kind, model::RouterKind::Openwrt) {
+                latency::status(&config)
+                    .await
+                    .ok()
+                    .map(|policies| json!({"policies":policies}))
+            } else {
+                None
+            };
             *app.config.lock().await = Some(config);
             app.traffic_history.lock().await.reset();
             *app.router_info.lock().await = Value::Null;
             *app.access_policy.lock().await = Value::Null;
             *app.speed_limits.lock().await = speed.unwrap_or(Value::Null);
+            *app.latencies.lock().await = delays.unwrap_or(Value::Null);
             let policy_note = match access {
                 Ok(policy) => {
                     app.cache_policy(policy).await;
@@ -235,6 +246,7 @@ async fn disconnect(State(app): State<Arc<App>>) -> ApiResult {
     *app.router_info.lock().await = Value::Null;
     *app.access_policy.lock().await = Value::Null;
     *app.speed_limits.lock().await = Value::Null;
+    *app.latencies.lock().await = Value::Null;
     app.devices.lock().await.clear();
     app.event(
         "Gateway session disconnected. Existing gateway rules remain in place.".into(),
@@ -455,6 +467,63 @@ async fn set_limit(
         }
         Err(error) => {
             app.event(format!("Speed cap {mac}: {error}"), "failed_or_unknown")
+                .await;
+            Err(error.into())
+        }
+    }
+}
+
+async fn latency_status(State(app): State<Arc<App>>) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    *app.latencies.lock().await = Value::Null;
+    let policies = latency::status(&app.configured().await?).await?;
+    let value =
+        json!({"policies":policies,"message":"Device delay policies refreshed from OpenWrt."});
+    *app.latencies.lock().await = value.clone();
+    Ok(Json(value))
+}
+
+async fn set_latency(
+    State(app): State<Arc<App>>,
+    Json(input): Json<latency::DelayInput>,
+) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    let mac = input.validate()?;
+    let config = app.configured().await?;
+    let device = app
+        .devices
+        .lock()
+        .await
+        .iter()
+        .find(|d| d.mac == mac)
+        .cloned();
+    if input.delay_ms > 0 && device.is_none() {
+        return Err(ApiError(
+            "Refresh inventory and select an observed device before setting delay".into(),
+        ));
+    }
+    *app.latencies.lock().await = Value::Null;
+    match latency::set(&config, &input, device.as_ref().map(|d| d.ip.as_str())).await {
+        Ok(value) => {
+            *app.latencies.lock().await = json!({"policies":value["policies"]});
+            app.event(
+                format!(
+                    "Device delay {mac}: {}",
+                    value["message"].as_str().unwrap_or("Readback completed")
+                ),
+                "rule_verified",
+            )
+            .await;
+            Ok(Json(value))
+        }
+        Err(error) => {
+            app.event(format!("Device delay {mac}: {error}"), "failed_or_unknown")
                 .await;
             Err(error.into())
         }
@@ -786,6 +855,8 @@ fn routes(app: Arc<App>) -> Router {
         .route("/api/network/traffic", post(network_traffic))
         .route("/api/limits", post(limit_status))
         .route("/api/device/limit", post(set_limit))
+        .route("/api/latencies", post(latency_status))
+        .route("/api/device/latency", post(set_latency))
         .route("/api/profiles", post(add_profile))
         .route(
             "/api/profiles/{id}",
@@ -846,6 +917,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         router_info: Mutex::new(Value::Null),
         access_policy: Mutex::new(Value::Null),
         speed_limits: Mutex::new(Value::Null),
+        latencies: Mutex::new(Value::Null),
         traffic_gate: Mutex::new(()),
         traffic_history: Mutex::new(traffic::History::default()),
     });

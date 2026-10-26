@@ -13,6 +13,7 @@ let snapshot = {
     router_info: null,
     access_policy: null,
     speed_limits: null,
+    latencies: null,
     devices: [],
     profiles: [],
     events: [],
@@ -350,13 +351,17 @@ function applyCapabilities() {
     const canLimit = snapshot.gateway?.kind === "openwrt";
     el("inspect-limits").disabled = busy || !canLimit;
     document
-        .querySelectorAll("#limit-form input")
+        .querySelectorAll("#limit-form input, #latency-form input")
         .forEach((input) => {
         input.disabled = busy || !canLimit;
     });
     el("apply-limit").disabled =
         busy || !canLimit || !limitTarget;
     el("remove-limit").disabled =
+        busy || !canLimit || !limitTarget;
+    el("apply-latency").disabled =
+        busy || !canLimit || !limitTarget;
+    el("remove-latency").disabled =
         busy || !canLimit || !limitTarget;
     document
         .querySelectorAll("[data-action]")
@@ -400,7 +405,7 @@ function renderDevices() {
             ? "Try another name, IP address, or MAC address."
             : "Refresh the local neighbor cache, or connect your gateway for a fuller device inventory.";
     el("devices").innerHTML = devices
-        .map((d) => `<tr><td><div class="device-name"><span class="device-initial" aria-hidden="true">${d.identity.category.startsWith("Phone") ? "▯" : "▣"}</span><div><strong>${escape(d.identity.display_name ?? d.name)}</strong><small>${escape(d.identity.manufacturer ?? d.identity.mac_kind)}</small>${d.identity.model ? `<small>${escape(d.identity.model)}</small>` : ""}</div></div></td><td>${escape(d.ip)}</td><td class="code">${escape(d.mac)}</td><td>${accessBadge(d.mac)}${speedBadge(d.mac)}<small class="access-observation">${escape(d.presence)}</small></td><td><div class="row-actions"><button class="secondary" data-ping="${escape(d.mac)}" aria-label="Ping ${escape(d.identity.display_name ?? d.name)}">Ping</button><button class="secondary" data-device="${escape(d.mac)}" aria-label="Manage ${escape(d.identity.display_name ?? d.name)}">Details</button><button class="danger" data-action="block" data-mac="${escape(d.mac)}" aria-label="Ban ${escape(d.identity.display_name ?? d.name)}">Ban</button><button class="secondary" data-action="unblock" data-mac="${escape(d.mac)}" aria-label="Unban ${escape(d.identity.display_name ?? d.name)}">Unban</button><button class="secondary row-speed" data-speed="${escape(d.mac)}" aria-label="Speed limit ${escape(d.identity.display_name ?? d.name)}">Speed limit</button></div></td></tr>`)
+        .map((d) => `<tr><td><div class="device-name"><span class="device-initial" aria-hidden="true">${d.identity.category.startsWith("Phone") ? "▯" : "▣"}</span><div><strong>${escape(d.identity.display_name ?? d.name)}</strong><small>${escape(d.identity.manufacturer ?? d.identity.mac_kind)}</small>${d.identity.model ? `<small>${escape(d.identity.model)}</small>` : ""}</div></div></td><td>${escape(d.ip)}</td><td class="code">${escape(d.mac)}</td><td>${accessBadge(d.mac)}${speedBadge(d.mac)}<small class="access-observation">${escape(d.presence)}</small></td><td><div class="row-actions"><button class="secondary" data-ping="${escape(d.mac)}" aria-label="Ping ${escape(d.identity.display_name ?? d.name)}">Ping</button><button class="secondary" data-device="${escape(d.mac)}" aria-label="Manage ${escape(d.identity.display_name ?? d.name)}">Details</button><button class="danger" data-action="block" data-mac="${escape(d.mac)}" aria-label="Ban ${escape(d.identity.display_name ?? d.name)}">Ban</button><button class="secondary" data-action="unblock" data-mac="${escape(d.mac)}" aria-label="Unban ${escape(d.identity.display_name ?? d.name)}">Unban</button><button class="secondary row-speed" data-speed="${escape(d.mac)}" aria-label="Speed and latency ${escape(d.identity.display_name ?? d.name)}">Speed &amp; latency</button></div></td></tr>`)
         .join("");
 }
 function accessBadge(mac) {
@@ -422,14 +427,15 @@ function speedBadge(mac) {
     if (!snapshot.speed_limits)
         return '<small class="access-observation">Speed cap unknown</small>';
     const limit = snapshot.speed_limits.limits.find((limit) => limit.mac === mac);
-    return `<small class="access-observation">${limit ? `↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps` : "No Lantern speed cap"}</small>`;
+    const delay = snapshot.latencies?.policies.find((policy) => policy.mac === mac);
+    return `<small class="access-observation">${limit ? `↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps` : "No Lantern speed cap"}</small><small class="access-observation">${snapshot.latencies ? (delay ? `Delay ${delay.delay_ms} ± ${delay.jitter_ms} ms` : "No Lantern delay") : "Delay unknown"}</small>`;
 }
 function openLimit(mac) {
     limitTarget = mac;
     const device = snapshot.devices.find((device) => device.mac === mac);
     const limit = snapshot.speed_limits?.limits.find((limit) => limit.mac === mac);
     el("limit-title").textContent =
-        `Speed limit · ${device?.identity.display_name ?? device?.name ?? mac}`;
+        `Speed & latency · ${device?.identity.display_name ?? device?.name ?? mac}`;
     el("limit-target").textContent = device ? `${device.ip} · ${mac}` : mac;
     el("limit-support").textContent =
         snapshot.gateway?.kind === "openwrt"
@@ -438,6 +444,10 @@ function openLimit(mac) {
     const form = el("limit-form");
     field(form, "down").value = String(limit ? limit.down_kbps / 1000 : 10);
     field(form, "up").value = String(limit ? limit.up_kbps / 1000 : 10);
+    const delay = snapshot.latencies?.policies.find((policy) => policy.mac === mac);
+    const delayForm = el("latency-form");
+    field(delayForm, "delay").value = String(delay?.delay_ms ?? 100);
+    field(delayForm, "jitter").value = String(delay?.jitter_ms ?? 0);
     modal("limit-dialog").showModal();
     applyCapabilities();
 }
@@ -464,6 +474,39 @@ el("limit-form").addEventListener("submit", (event) => {
         });
     })();
 });
+async function changeDelay(remove) {
+    if (busy || !limitTarget || snapshot.gateway?.kind !== "openwrt")
+        return;
+    const mac = limitTarget;
+    const form = el("latency-form");
+    const delay = remove ? 0 : Number(field(form, "delay").value);
+    const jitter = remove ? 0 : Number(field(form, "jitter").value);
+    if (jitter > delay) {
+        notice("Jitter cannot exceed delay.", true);
+        return;
+    }
+    if (!(await confirmAction(remove ? "Remove device delay?" : "Apply device delay?", remove
+        ? `Remove Lantern's delay for ${mac}.`
+        : `Add ${delay} ms of delay with ${jitter} ms jitter to gateway-to-device traffic for ${mac}. This uses an unused LAN queue and clears on reboot.`, remove ? "Remove delay" : "Apply delay")))
+        return;
+    await operation(async () => {
+        const result = await api("device/latency", "POST", {
+            mac,
+            delay_ms: delay,
+            jitter_ms: jitter,
+        });
+        modal("limit-dialog").close();
+        modal("limit-list-dialog").close();
+        return result.message;
+    });
+}
+el("latency-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void changeDelay(false);
+});
+el("remove-latency").addEventListener("click", () => {
+    void changeDelay(true);
+});
 el("remove-limit").addEventListener("click", () => {
     if (busy || !limitTarget || snapshot.gateway?.kind !== "openwrt")
         return;
@@ -485,11 +528,30 @@ el("remove-limit").addEventListener("click", () => {
 });
 el("inspect-limits").addEventListener("click", () => {
     void operation(async () => {
-        const result = await api("limits", "POST", {});
-        el("limit-list-results").innerHTML =
-            `<p>${escape(result.message)}</p>${result.limits.length ? result.limits.map((limit) => `<div class="rule"><div><strong class="code">${escape(limit.mac)}</strong><p>↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps · ${escape(limit.interface)}</p><p>Dropped: ↑ ${bytes(limit.up_dropped_bytes)} · ↓ ${bytes(limit.down_dropped_bytes)}</p></div><button class="secondary" data-speed="${escape(limit.mac)}">Edit / remove</button></div>`).join("") : "<p>No Lantern device speed caps are installed.</p>"}`;
+        let result = null;
+        let delays = null;
+        let speedError = "";
+        let delayError = "";
+        try {
+            result = await api("limits", "POST", {});
+        }
+        catch (error) {
+            speedError = String(error);
+        }
+        try {
+            delays = await api("latencies", "POST", {});
+        }
+        catch (error) {
+            delayError = String(error);
+        }
+        el("limit-list-results").innerHTML = result
+            ? `<p>${escape(result.message)}</p>${result.limits.length ? result.limits.map((limit) => `<div class="rule"><div><strong class="code">${escape(limit.mac)}</strong><p>↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps · ${escape(limit.interface)}</p><p>Dropped: ↑ ${bytes(limit.up_dropped_bytes)} · ↓ ${bytes(limit.down_dropped_bytes)}</p></div><button class="secondary" data-speed="${escape(limit.mac)}">Edit / remove</button></div>`).join("") : "<p>No Lantern device speed caps are installed.</p>"}`
+            : `<p>Speed caps could not be read: ${escape(speedError)}</p>`;
+        el("limit-list-results").insertAdjacentHTML("beforeend", `<h3>Added latency</h3>${delays ? (delays.policies.length ? delays.policies.map((policy) => `<div class="rule"><div><strong class="code">${escape(policy.mac)}</strong><p>${policy.delay_ms} ± ${policy.jitter_ms} ms · ${escape(policy.interface)} · ${policy.packets} packets, ${policy.drops} dropped</p></div><button class="secondary" data-speed="${escape(policy.mac)}">Edit / remove</button></div>`).join("") : "<p>No Lantern device delays are installed.</p>") : `<p>Delays could not be read: ${escape(delayError)}</p>`}`);
         modal("limit-list-dialog").showModal();
-        return result.message;
+        return speedError || delayError
+            ? "Some network effects could not be read; see the details."
+            : "Device speed and latency policies refreshed.";
     });
 });
 el("refresh-access").addEventListener("click", () => {

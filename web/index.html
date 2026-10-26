@@ -265,7 +265,7 @@
                 Inspect gateway rules
               </button>
               <button class="secondary" id="inspect-limits">
-                Inspect speed limits
+                Inspect traffic controls
               </button>
             </div>
           </div>
@@ -459,7 +459,7 @@
     </dialog>
     <dialog id="limit-dialog" aria-labelledby="limit-title">
       <div class="dialog-heading">
-        <h2 id="limit-title">Device speed limit</h2>
+        <h2 id="limit-title">Device speed and latency</h2>
         <button class="icon-button close" aria-label="Close speed limit dialog">
           ×
         </button>
@@ -467,6 +467,7 @@
       <p id="limit-target"></p>
       <p id="limit-support"></p>
       <form id="limit-form">
+        <h3>Speed cap</h3>
         <div class="form-row">
           <label
             >Download · Mbps<input
@@ -501,10 +502,49 @@
           </button>
         </div>
       </form>
+      <form id="latency-form">
+        <h3>Added latency</h3>
+        <div class="form-row">
+          <label
+            >Delay · ms<input
+              name="delay"
+              type="number"
+              min="1"
+              max="2000"
+              step="1"
+              value="100"
+              required
+          /></label>
+          <label
+            >Jitter · ms<input
+              name="jitter"
+              type="number"
+              min="0"
+              max="2000"
+              step="1"
+              value="0"
+              required
+          /></label>
+        </div>
+        <p>
+          Delays traffic from the gateway to this device, increasing ping by
+          roughly this amount. Jitter must not exceed delay. Requires disabled
+          offloading and an unused LAN root queue; the policy clears on gateway
+          reboot.
+        </p>
+        <div class="dialog-actions">
+          <button class="secondary" id="remove-latency" type="button">
+            Remove delay
+          </button>
+          <button class="primary" id="apply-latency" type="submit">
+            Apply delay
+          </button>
+        </div>
+      </form>
     </dialog>
     <dialog id="limit-list-dialog" aria-labelledby="limit-list-title">
       <div class="dialog-heading">
-        <h2 id="limit-list-title">Device speed caps</h2>
+        <h2 id="limit-list-title">Device traffic controls</h2>
         <button class="icon-button close" aria-label="Close speed cap list">
           ×
         </button>

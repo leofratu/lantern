@@ -65,10 +65,10 @@ pub(crate) fn interface_name(value: &str) -> Result<&str> {
     Ok(value)
 }
 
-async fn offload_check(config: &RouterConfig) -> Result<()> {
+pub(crate) async fn offload_check(config: &RouterConfig) -> Result<()> {
     let settings = ssh(config, "if command -v uci >/dev/null 2>&1; then uci -q get 'firewall.@defaults[0].flow_offloading' || :; uci -q get 'firewall.@defaults[0].flow_offloading_hw' || :; fi").await?;
     if settings.lines().any(|line| line.trim() == "1") {
-        return Err("Disable software and hardware flow offloading in OpenWrt before setting speed caps. Lantern does not change global offload settings.".into());
+        return Err("Disable software and hardware flow offloading in OpenWrt before changing device traffic controls. Lantern does not change global offload settings.".into());
     }
     let rules: Value = serde_json::from_str(&ssh(config, "nft -j list ruleset").await?)
         .map_err(|_| "Invalid gateway ruleset")?;
@@ -78,9 +78,50 @@ async fn offload_check(config: &RouterConfig) -> Result<()> {
         .iter()
         .any(|item| item.get("flowtable").is_some())
     {
-        return Err("The gateway has a flowtable that may bypass speed caps. Review offloading before continuing.".into());
+        return Err("The gateway has a flowtable that may bypass device traffic controls. Review offloading before continuing.".into());
     }
     Ok(())
+}
+
+pub(crate) async fn direct_interface(
+    config: &RouterConfig,
+    ip: Option<&str>,
+    mac: &str,
+) -> Result<String> {
+    let ip: std::net::Ipv4Addr = ip
+        .ok_or("Refresh inventory before changing device traffic")?
+        .parse()
+        .map_err(|_| "Invalid device IP")?;
+    if !ip.is_private() {
+        return Err("Device must have a private IPv4 route".into());
+    }
+    let routes: Value = serde_json::from_str(&ssh(config, &format!("ip -j route get {ip}")).await?)
+        .map_err(|_| "OpenWrt needs ip-full with JSON route support")?;
+    let route = routes
+        .as_array()
+        .and_then(|routes| routes.first())
+        .ok_or("Device route is missing")?;
+    if route.get("gateway").is_some() {
+        return Err("The device must be directly connected to the OpenWrt LAN".into());
+    }
+    let interface = interface_name(route["dev"].as_str().ok_or("LAN route has no interface")?)?;
+    let neighbors: Value = serde_json::from_str(
+        &ssh(config, &format!("ip -j neigh show to {ip} dev {interface}")).await?,
+    )
+    .map_err(|_| "OpenWrt needs ip-full with JSON neighbor support")?;
+    if !neighbors
+        .as_array()
+        .ok_or("Invalid neighbor response")?
+        .iter()
+        .any(|entry| {
+            entry["lladdr"]
+                .as_str()
+                .is_some_and(|entry| entry.eq_ignore_ascii_case(mac))
+        })
+    {
+        return Err("The current LAN neighbor does not match this device's MAC. Refresh inventory before changing its traffic.".into());
+    }
+    Ok(interface.to_string())
 }
 
 async fn table(config: &RouterConfig) -> Result<Option<Value>> {
@@ -316,40 +357,7 @@ pub async fn set(config: &RouterConfig, input: &LimitInput, ip: Option<&str>) ->
     }
     if input.up_kbps != 0 {
         offload_check(config).await?;
-        let ip: std::net::Ipv4Addr = ip
-            .ok_or("Refresh inventory before setting a speed cap")?
-            .parse()
-            .map_err(|_| "Invalid device IP")?;
-        if !ip.is_private() {
-            return Err("Device must have a private IPv4 route".into());
-        }
-        let routes: Value =
-            serde_json::from_str(&ssh(config, &format!("ip -j route get {ip}")).await?)
-                .map_err(|_| "OpenWrt needs ip-full with JSON route support")?;
-        let route = routes
-            .as_array()
-            .and_then(|routes| routes.first())
-            .ok_or("Device route is missing")?;
-        if route.get("gateway").is_some() {
-            return Err("The device must be directly connected to the OpenWrt LAN".into());
-        }
-        let interface = interface_name(route["dev"].as_str().ok_or("LAN route has no interface")?)?;
-        let neighbors: Value = serde_json::from_str(
-            &ssh(config, &format!("ip -j neigh show to {ip} dev {interface}")).await?,
-        )
-        .map_err(|_| "OpenWrt needs ip-full with JSON neighbor support")?;
-        if !neighbors
-            .as_array()
-            .ok_or("Invalid neighbor response")?
-            .iter()
-            .any(|entry| {
-                entry["lladdr"]
-                    .as_str()
-                    .is_some_and(|entry| entry.eq_ignore_ascii_case(&mac))
-            })
-        {
-            return Err("The current LAN neighbor does not match this device's MAC. Refresh inventory before setting a limit.".into());
-        }
+        let interface = direct_interface(config, ip, &mac).await?;
         commands.push(format!(
             "add table netdev {TABLE} {{ comment \"{OWNER}\"; }}"
         ));
