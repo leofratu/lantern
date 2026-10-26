@@ -1,0 +1,66 @@
+.identity-details {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 24px;
+  margin-bottom: 24px;
+}
+.identity-details ul {
+  font-size: 12px;
+  line-height: 1.7;
+  padding-left: 20px;
+  color: var(--muted);
+}
+.identity-details li {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.identity-details button {
+  font-size: 12px;
+}
+.gateway-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#movistar-ssh {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 18px;
+  margin: 22px 0;
+}
+#movistar-ssh legend {
+  font-size: 13px;
+  padding: 0 5px;
+}
+.fingerprint {
+  display: block;
+  font:
+    11px ui-monospace,
+    monospace;
+  overflow-wrap: anywhere;
+  margin: 14px 0;
+}
+dialog .checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  line-height: 1.6;
+}
+dialog .checkbox-label input {
+  display: inline;
+  width: auto;
+  margin: 3px 0 0;
+}
+.radio-evidence {
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+}
+.radio-evidence p {
+  margin: 4px 0;
+}
+dialog {
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  scroll-padding-top: 24px;
+}

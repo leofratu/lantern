@@ -1,0 +1,14 @@
+{
+  "name": "lantern-ui",
+  "private": true,
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "tsc",
+    "format": "prettier --write web/app.ts web/style.css web/identity.css web/index.html tsconfig.json package.json",
+    "format:check": "prettier --check web/app.ts web/style.css web/identity.css web/index.html tsconfig.json package.json"
+  },
+  "devDependencies": {
+    "prettier": "3.9.10",
+    "typescript": "~5.9.3"
+  }
+}

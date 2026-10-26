@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="lantern-token" content="__TOKEN__" />
+    <title>Lantern · Network workspace</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/identity.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Lantern home"
+        ><span class="brand-mark">⌘</span>lantern<span class="version"
+          >0.1</span
+        ></a
+      >
+      <p class="sidebar-label">Workspace</p>
+      <nav aria-label="Workspace">
+        <button data-page="network" class="nav active">
+          <span aria-hidden="true">◈</span> Device inventory
+        </button>
+        <button data-page="apps" class="nav">
+          <span aria-hidden="true">⇅</span> App bandwidth
+        </button>
+        <button data-page="activity" class="nav">
+          <span aria-hidden="true">≡</span> Activity log
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-indicator"><i></i> Runs on your computer</div>
+        <p>Free software. Local control.<br />No account. No cloud service.</p>
+        <a
+          href="https://www.gnu.org/licenses/gpl-3.0.html"
+          target="_blank"
+          rel="noreferrer"
+          >GPL-3.0-or-later ↗</a
+        >
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <span
+          >Local workspace <span class="separator">/</span>
+          <span id="breadcrumb">Device inventory</span></span
+        ><span class="platform" id="platform">Local session</span>
+      </header>
+      <div class="content">
+        <div id="notice" role="status" aria-live="polite" hidden></div>
+        <section id="network-page" class="page">
+          <div class="page-heading">
+            <div>
+              <h1>Device inventory</h1>
+              <p>Know what’s connected. Control what gets through.</p>
+            </div>
+            <button class="primary" id="refresh">↻ Refresh devices</button>
+          </div>
+          <div class="network-strip">
+            <div class="network-node">
+              <span class="node-icon">▣</span>
+              <div>
+                <strong>This computer</strong><span>Lantern workspace</span>
+              </div>
+            </div>
+            <div class="connection-line"></div>
+            <div class="network-node">
+              <span class="node-icon router-icon">⌁</span>
+              <div>
+                <strong id="gateway-name">No gateway connected</strong
+                ><span id="gateway-address">Local inventory is available</span>
+              </div>
+            </div>
+            <button class="secondary" id="gateway-button">
+              Connect gateway
+            </button>
+          </div>
+          <div class="metrics">
+            <div>
+              <span>Device observations</span
+              ><strong id="device-count">0</strong
+              ><small>Latest inventory</small>
+            </div>
+            <div>
+              <span>Named devices</span><strong id="named-count">0</strong
+              ><small>Reported by your gateway</small>
+            </div>
+            <div>
+              <span>Access control</span
+              ><strong class="metric-text" id="control-status"
+                >Not connected</strong
+              ><small id="control-detail">Connect a supported gateway</small>
+            </div>
+          </div>
+          <div class="section-heading">
+            <div>
+              <h2>Devices</h2>
+              <span id="inventory-source"
+                >From this computer’s neighbor cache</span
+              >
+            </div>
+            <label class="search"
+              ><span aria-hidden="true">⌕</span
+              ><input
+                id="search"
+                type="search"
+                placeholder="Find a name, IP, or MAC"
+                aria-label="Filter devices"
+            /></label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>IP address</th>
+                  <th>MAC address</th>
+                  <th>Observation</th>
+                  <th><span class="sr-only">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="devices"></tbody>
+            </table>
+            <div class="empty" id="device-empty">
+              <span class="empty-symbol">⌁</span>
+              <h3>A clearer view starts here</h3>
+              <p>
+                Refresh the local neighbor cache, or connect your gateway for a
+                fuller device inventory.
+              </p>
+              <button class="text-button" id="empty-connect">
+                Connect a gateway ↗
+              </button>
+            </div>
+          </div>
+          <p class="footnote">
+            <span aria-hidden="true">ⓘ</span> A cached entry or DHCP lease does
+            not prove a device is currently online. Private MAC addresses can
+            change.
+          </p>
+          <div class="enforcement-note">
+            <div>
+              <h3>Gateway and connection evidence</h3>
+              <p>
+                Read the router’s firmware and current Wi-Fi associations.
+                Inspect a device for manufacturer, model, services, and
+                advertised software versions.
+              </p>
+            </div>
+            <div class="gateway-actions">
+              <button class="secondary" id="router-information">
+                Router information</button
+              ><button class="secondary" id="inspect-rules">
+                Inspect gateway rules
+              </button>
+            </div>
+          </div>
+        </section>
+        <section id="apps-page" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <h1>App bandwidth</h1>
+              <p>Give a proxy-compatible app its own bandwidth budget.</p>
+            </div>
+            <button class="primary" id="new-profile">＋ New app profile</button>
+          </div>
+          <div class="info-banner">
+            <strong>One app. One local proxy.</strong>
+            <p>
+              Create a profile, then set that app’s SOCKS5 proxy to the address
+              shown. Limits apply to TCP traffic using the proxy, shared across
+              all its connections. Other traffic is unaffected.
+            </p>
+          </div>
+          <div id="profiles" class="profiles"></div>
+          <div id="profile-empty" class="empty panel">
+            <span class="empty-symbol">⇅</span>
+            <h3>Make room for the apps that matter</h3>
+            <p>
+              Start a profile for a browser, download client, or another app
+              with SOCKS5 support.
+            </p>
+          </div>
+          <div class="enforcement-note">
+            <div>
+              <h3>Explicit routing, predictable limits</h3>
+              <p>
+                This version does not automatically identify processes or shape
+                UDP / QUIC. Configure SOCKS5 with proxy DNS in your app; disable
+                bypasses if all of its traffic must be limited.
+              </p>
+            </div>
+          </div>
+        </section>
+        <section id="activity-page" class="page" hidden>
+          <div class="page-heading">
+            <div>
+              <h1>Activity log</h1>
+              <p>Requests, outcomes, and what the gateway could verify.</p>
+            </div>
+          </div>
+          <div id="events" class="event-list"></div>
+          <p class="footnote">
+            The latest 100 events stay in memory for this session. Gateway rules
+            may outlive this app session.
+          </p>
+        </section>
+      </div>
+    </main>
+    <dialog id="gateway-dialog">
+      <form id="gateway-form">
+        <div class="dialog-heading">
+          <h2>Connect a gateway</h2>
+          <button
+            class="icon-button close"
+            type="button"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </div>
+        <p>
+          Use a gateway you administer. Credentials stay in memory until you
+          exit or disconnect.
+        </p>
+        <label
+          >Gateway type<select name="kind" id="router-kind">
+            <option value="openwrt">OpenWrt · SSH management</option>
+            <option value="movistar">Movistar Askey RTF8115VW</option>
+          </select></label
+        >
+        <label
+          >Router IP address<input
+            name="host"
+            value="192.168.1.1"
+            required
+            autocomplete="off"
+            inputmode="decimal"
+        /></label>
+        <label id="ssh-field"
+          >SSH username<input name="user" value="root" autocomplete="username"
+        /></label>
+        <label id="password-field" hidden
+          >Router admin password<input
+            type="password"
+            name="password"
+            autocomplete="current-password"
+        /></label>
+        <fieldset id="movistar-ssh" hidden>
+          <legend>Router SSH controls</legend>
+          <button class="secondary" type="button" id="probe-ssh">
+            Inspect SSH identity</button
+          ><output id="ssh-fingerprint" class="fingerprint"></output>
+          <label class="checkbox-label"
+            ><input type="checkbox" id="trust-ssh" />I trust this SSH identity
+            for my router</label
+          >
+          <p>
+            Required for authenticated disconnect requests. Legacy RSA SSH
+            support is enabled only for this connection. Credentials are not
+            saved to disk.
+          </p>
+        </fieldset>
+        <div id="router-help" class="form-help"></div>
+        <div class="dialog-actions">
+          <button type="button" class="secondary" id="disconnect-gateway">
+            Disconnect gateway</button
+          ><button class="primary" type="submit">
+            Connect & read inventory
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="router-info-dialog">
+      <div class="dialog-heading">
+        <h2>Router information</h2>
+        <button
+          class="icon-button close"
+          type="button"
+          aria-label="Close dialog"
+        >
+          ×
+        </button>
+      </div>
+      <div id="router-info-results"></div>
+    </dialog>
+    <dialog id="profile-dialog">
+      <form id="profile-form">
+        <div class="dialog-heading">
+          <h2 id="profile-title">New app profile</h2>
+          <button
+            class="icon-button close"
+            type="button"
+            aria-label="Close dialog"
+          >
+            ×
+          </button>
+        </div>
+        <p>Limits are shared by all TCP connections through this profile.</p>
+        <label
+          >App profile name<input
+            name="name"
+            placeholder="e.g. Download client"
+            maxlength="60"
+            required
+        /></label>
+        <div class="form-row">
+          <label
+            >Download · Mbps<input
+              name="down"
+              type="number"
+              min="0.008"
+              max="1000"
+              step="0.001"
+              value="10"
+              required /></label
+          ><label
+            >Upload · Mbps<input
+              name="up"
+              type="number"
+              min="0.008"
+              max="1000"
+              step="0.001"
+              value="2"
+              required
+          /></label>
+        </div>
+        <div class="dialog-actions">
+          <button class="primary" type="submit">Start app proxy</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="device-dialog">
+      <div class="dialog-heading">
+        <h2 id="selected-name">Device controls</h2>
+        <button
+          class="icon-button close"
+          type="button"
+          aria-label="Close dialog"
+        >
+          ×
+        </button>
+      </div>
+      <div id="selected-device"></div>
+    </dialog>
+    <dialog id="rules-dialog">
+      <div class="dialog-heading">
+        <h2>Gateway evidence</h2>
+        <button
+          class="icon-button close"
+          type="button"
+          aria-label="Close dialog"
+        >
+          ×
+        </button>
+      </div>
+      <div id="rule-results"></div>
+    </dialog>
+    <dialog id="confirm-dialog">
+      <div class="dialog-heading">
+        <h2 id="confirm-title">Confirm action</h2>
+      </div>
+      <p id="confirm-description"></p>
+      <div class="dialog-actions">
+        <button id="cancel-action" class="secondary">Cancel</button
+        ><button id="confirm-action" class="danger">Confirm</button>
+      </div>
+    </dialog>
+  </body>
+</html>
