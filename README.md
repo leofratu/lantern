@@ -171,7 +171,7 @@ Some firmware requires connection-specific legacy RSA host-key compatibility. Ke
 
 A MAC block applies to that address on the managed router. It cannot follow a device that changes its private MAC, uses another interface or gateway, or spoofs an address. Verification concerns this router's Wi-Fi radios; wired enforcement and every forwarding/offload path have not been independently measured. A silent device or an old DHCP lease alone does not prove blocking.
 
-**Disconnect once** is a separate action. Its acknowledgement does not install a blacklist entry, and the device can reconnect immediately.
+**Disconnect once** in device details sends a one-time Wi-Fi disconnect without changing the blacklist. The device can reconnect immediately. Lantern returns after the command and checks the radio lists in the background; an absent device may already have been offline, so absence alone does not prove the command caused the disconnect. On OpenWrt, a disconnect requests a 60-second reconnect ban instead.
 
 ### OpenWrt
 
@@ -193,6 +193,16 @@ In **Speed & latency**, set delay and optional jitter in milliseconds and apply 
 
 Latency requires an OpenWrt gateway in the traffic path with `ip-full`, `tc-full` with JSON support, and the kernel's `prio`, `netem`, and `flower` components. Flow offloading must be disabled. Lantern only installs its queue on a LAN interface with an unused `noqueue` root; it refuses to replace an existing queue such as SQM. Each interface supports up to 15 delayed devices. The queue holds at most 1,000 packets per device and may drop packets when full. **Inspect traffic controls** also lists delays and their queue counters, including devices absent from inventory. Lantern checks its ownership marker and reads back the settings before reporting success. Avoid simultaneous queue changes by another administrator; inspect gateway state if an operation reports an unknown outcome. The packet path was tested in isolated Linux namespaces; physical OpenWrt hardware has not yet been validated.
 
+#### Temporary ping increase
+
+Choose **Ping increase** on a device row, set the added delay in milliseconds and the duration, and start the spike. A timed nftables set on the OpenWrt gateway selects only that MAC for its delay queue. The gateway expires the selection automatically, including when Lantern is closed; packets already queued can still arrive late. Added gateway-to-device delay raises round-trip ping approximately by that amount, but game behavior and actual latency vary. Other network paths and hardware-offloaded traffic may bypass it.
+
+This control requires `ip-full`, `tc-full`, netdev nftables egress support, `prio` and `netem`, disabled flow offloading, and a LAN interface with no existing root queue. Lantern refuses to replace an existing queue. One spike per interface can be active at a time. The inactive owned queue remains after expiration; use **Release queue** in the dialog to remove it before applying another latency queue. Queue or policy changes by another administrator can make readback inconclusive. The timer and packet path were tested in isolated Linux namespaces, not on physical OpenWrt hardware.
+
+On macOS with the pictured Movistar router, Lantern can instead prepare a temporary one-device IP relay through the Mac. It does not change the router's configuration. Starting it requires running the displayed command in Terminal and authenticating with macOS administrator credentials; never enter those credentials in Lantern. The helper redirects the selected device's gateway neighbor entry, holds packets in memory for the chosen delay, and sends them to the existing router. It does not record packet contents. IPv6 is included only when the Mac has an IPv6 default gateway and the gateway and target have matching link-local entries in its neighbor cache. The UI reports whether IPv6 was configured and how many packets of each protocol were relayed; zero IPv6 packets do not verify an IPv6 delay. Traffic that bypasses this path is unaffected. The Mac must stay on, and router or client protections may prevent the relay from working.
+
+An independent watchdog sends IPv4 ARP and, when configured, IPv6 neighbor restoration frames at the deadline or if the relay process exits. Sending recovery frames does not prove the client accepted them. If the Mac loses power or the device cannot reconnect, reconnect that device's Wi-Fi. The UI reports relayed packet counts and measured hold time; those are not game-server RTT measurements. The IPv4 relay was exercised on the user's Movistar network; IPv6 has not been verified on that network.
+
 <details>
 <summary><strong>Firewall behavior, rule lifetime, and recovery</strong></summary>
 
@@ -210,7 +220,7 @@ Wi-Fi disconnect uses authenticated `ubus hostapd.* del_client` calls, requests 
 
 ## Device identification
 
-Every device row has **Ban**, **Unban**, **Ping**, **Speed & latency**, and **Details** controls. Ban/Unban require a supported gateway connection; device speed and latency controls require OpenWrt. Access badges explicitly show **Banned**, **Not banned**, or **Unknown**, with a router-read timestamp. **Refresh ban status** reads current policy; OpenWrt status covers Lantern's forwarding rules, while Movistar status covers its native blacklist. Other router restrictions can still apply.
+Every device row has **Ping increase**, **Ban**, **Unban**, **Ping**, **Speed & latency**, and **Details** controls. Ban/Unban require a supported gateway connection; device speed and latency controls require OpenWrt. Access badges explicitly show **Banned**, **Not banned**, or **Unknown**, with a router-read timestamp. **Refresh ban status** reads current policy; OpenWrt status covers Lantern's forwarding rules, while Movistar status covers its native blacklist. Other router restrictions can still apply.
 
 Ping sends three ICMP requests from your computer and displays replies, packet loss, and round-trip times. A missing ICMP reply is not proof that the device is offline or blocked. Narrow windows keep controls beside each device instead of hiding them off-screen.
 

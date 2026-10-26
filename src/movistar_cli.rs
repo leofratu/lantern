@@ -164,14 +164,18 @@ impl<'a> CliClient<'a> {
         }
         Ok(text)
     }
+
+    async fn call(&self, command: &str) -> Result<String> {
+        let mut session = self.connect().await?;
+        let result = self.run(&mut session, command).await;
+        session.close().await;
+        result
+    }
 }
 
 async fn cli(config: &RouterConfig, command: &str) -> Result<String> {
     let client = CliClient::new(config).await?;
-    let mut session = client.connect().await?;
-    let result = client.run(&mut session, command).await;
-    session.close().await;
-    result
+    client.call(command).await
 }
 
 async fn prompt(reader: &mut tokio::process::ChildStdout) -> Result<String> {
@@ -447,17 +451,25 @@ async fn set_block_with_client(
 
 pub async fn disconnect(config: &RouterConfig, mac: &str) -> Result<Value> {
     let mac = mac_address(mac)?;
+    let client = CliClient::new(config).await?;
+    disconnect_with_client(&client, &mac).await
+}
+
+async fn disconnect_with_client(client: &CliClient<'_>, mac: &str) -> Result<Value> {
     // This is the firmware's native command, not an injected wireless frame.
-    let reply = cli(config, &format!("set deauthenticate {mac}")).await?;
-    let acknowledged = reported_deauthentication(&reply, &mac);
+    let reply = client.call(&format!("set deauthenticate {mac}")).await?;
+    let acknowledged = reported_deauthentication(&reply, mac);
     if acknowledged {
-        return Ok(
-            json!({"outcome":"router_deauth_reported","router_acknowledged":true,"message":"Router explicitly reported deauthentication for this MAC. The device can reconnect; current radio association is checked separately."}),
-        );
+        return Ok(json!({
+            "outcome": "router_deauth_reported",
+            "router_acknowledged": true,
+            "message": "Router explicitly reported deauthentication for this MAC. The device can reconnect; current radio association is checked separately.",
+        }));
     }
-    Ok(
-        json!({"outcome":"command_sent","message":"Disconnect command sent, but disconnection is unverified. The device is still associated, reconnected immediately, or verification could not be completed."}),
-    )
+    Ok(json!({
+        "outcome": "command_sent",
+        "message": "Disconnect command sent, but disconnection is unverified. The device is still associated, reconnected immediately, or verification could not be completed.",
+    }))
 }
 
 fn reported_deauthentication(reply: &str, mac: &str) -> bool {
@@ -588,6 +600,22 @@ done
                 .contains("timed out")
         );
         assert!(start.elapsed() < Duration::from_secs(12));
+        fs::remove_file(fixture.0.join("slow-disconnect")).expect("restore disconnect");
+        fs::write(fixture.0.join("events"), "").expect("reset events");
+        let before = fs::read_to_string(fixture.0.join("state")).expect("policy");
+        let result = disconnect_with_client(&client, mac)
+            .await
+            .expect("temporary disconnect");
+        assert_eq!(result["router_acknowledged"], true);
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("state")).expect("policy"),
+            before
+        );
+        let events = fs::read_to_string(fixture.0.join("events")).expect("events");
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            ["OPEN", "set deauthenticate 02:00:00:00:00:01", "exit"]
+        );
     }
     #[cfg(unix)]
     #[tokio::test]

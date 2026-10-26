@@ -69,10 +69,18 @@ interface Snapshot {
   access_policy: Blacklist | null;
   speed_limits: { limits: DeviceLimit[] } | null;
   latencies: { policies: DeviceDelay[] } | null;
+  spikes: { spikes: DeviceSpike[] } | null;
+  relay: RelayStatus | null;
   block_verification: {
     id: string;
     mac: string;
-    status: "checking" | "verified" | "inconclusive";
+    kind: "block" | "kick";
+    status:
+      | "checking"
+      | "verified"
+      | "observed_absent"
+      | "associated"
+      | "inconclusive";
     message: string;
   } | null;
   devices: Device[];
@@ -93,6 +101,35 @@ interface DeviceLimit {
 }
 interface LimitResponse extends Mutation {
   limits: DeviceLimit[];
+}
+interface DeviceSpike {
+  interface: string;
+  mac: string | null;
+  remaining_s: number | null;
+  delay_ms: number | null;
+  jitter_ms: number | null;
+  table_present: boolean;
+  queue_present: boolean;
+}
+interface SpikeResponse extends Mutation {
+  spikes: DeviceSpike[];
+}
+interface RelayStatus {
+  id: string;
+  mac: string;
+  state: string;
+  message: string;
+  command: string;
+  forwarded: number | null;
+  forwarded_ipv4: number | null;
+  forwarded_ipv6: number | null;
+  ipv6_available: boolean;
+  dropped: number | null;
+  remaining_s: number | null;
+  avg_hold_ms: number | null;
+}
+interface RelayResponse extends Mutation {
+  relay: RelayStatus;
 }
 interface DeviceDelay {
   mac: string;
@@ -166,6 +203,8 @@ let snapshot: Snapshot = {
   access_policy: null,
   speed_limits: null,
   latencies: null,
+  spikes: null,
+  relay: null,
   block_verification: null,
   devices: [],
   profiles: [],
@@ -186,6 +225,8 @@ let trafficCompletion: Promise<void> = Promise.resolve();
 let trafficSuggested = false;
 let trafficGateway = "";
 let trafficHistory: Array<{ down: number; up: number }> = [];
+let spikeTimer: number | undefined;
+let spikeTimerKey = "";
 
 async function api<T>(
   path: string,
@@ -238,6 +279,7 @@ function notice(message: string, error = false): void {
 async function operation(
   work: () => Promise<string>,
   progress = "Working… waiting for the local service and gateway evidence.",
+  waitForTraffic = true,
 ): Promise<void> {
   if (busy) return;
   const previousDialog = document.querySelector("dialog[open]");
@@ -252,13 +294,13 @@ async function operation(
     button.disabled = true;
   });
   notice(
-    trafficBusy
+    trafficBusy && waitForTraffic
       ? "Finishing the current network traffic read before contacting the router…"
       : progress,
   );
   try {
     // Avoid logging in to the router for telemetry while an action is using it.
-    await trafficCompletion;
+    if (waitForTraffic) await trafficCompletion;
     notice(progress);
     const message = await work();
     try {
@@ -348,6 +390,8 @@ async function sync(): Promise<void> {
   renderDevices();
   renderProfiles();
   renderEvents();
+  if (modal("limit-dialog").open) renderSpikes();
+  scheduleSpikeCheck();
   applyCapabilities();
 }
 
@@ -550,12 +594,57 @@ setInterval(() => {
     .then(() => {
       const next = snapshot.block_verification;
       if (!busy && next?.id === current.id && next.status !== "checking")
-        notice(next.message, next.status === "inconclusive");
+        notice(
+          next.message,
+          next.status === "inconclusive" || next.status === "associated",
+        );
     })
     .catch(() => {
       /* Keep the pending status; the next poll can retry. */
     });
 }, 3_000);
+
+setInterval(() => {
+  const current = snapshot.relay;
+  if (
+    busy ||
+    !current ||
+    !["waiting", "running", "restoring", "status_unknown"].includes(
+      current.state,
+    )
+  )
+    return;
+  void sync()
+    .then(() => {
+      const next = snapshot.relay;
+      if (
+        !busy &&
+        next?.id === current.id &&
+        next.state === "status_unknown" &&
+        current.state !== "status_unknown"
+      )
+        notice(next.message, true);
+      if (
+        !busy &&
+        next?.id === current.id &&
+        !["waiting", "running", "restoring", "status_unknown"].includes(
+          next.state,
+        )
+      )
+        notice(
+          next.message,
+          [
+            "failed",
+            "failed_restored",
+            "failed_or_unknown",
+            "expired",
+          ].includes(next.state),
+        );
+    })
+    .catch(() => {
+      /* A later poll can retry. */
+    });
+}, 2_000);
 
 function applyCapabilities(): void {
   el<HTMLButtonElement>("traffic-refresh").disabled =
@@ -575,6 +664,9 @@ function applyCapabilities(): void {
   );
   el<HTMLButtonElement>("refresh-access").disabled = busy || !canControl;
   const canLimit = snapshot.gateway?.kind === "openwrt";
+  const canRelay =
+    snapshot.platform === "macos" && snapshot.gateway?.kind === "movistar";
+  const canSpike = canLimit || canRelay;
   el<HTMLButtonElement>("inspect-limits").disabled = busy || !canLimit;
   document
     .querySelectorAll<HTMLInputElement>(
@@ -582,6 +674,11 @@ function applyCapabilities(): void {
     )
     .forEach((input) => {
       input.disabled = busy || !canLimit;
+    });
+  document
+    .querySelectorAll<HTMLInputElement>("#spike-form input")
+    .forEach((input) => {
+      input.disabled = busy || !canSpike;
     });
   el<HTMLButtonElement>("apply-limit").disabled =
     busy || !canLimit || !limitTarget;
@@ -591,6 +688,25 @@ function applyCapabilities(): void {
     busy || !canLimit || !limitTarget;
   el<HTMLButtonElement>("remove-latency").disabled =
     busy || !canLimit || !limitTarget;
+  for (const id of ["start-spike", "stop-spike", "refresh-spikes"])
+    el<HTMLButtonElement>(id).disabled = busy || !canSpike || !limitTarget;
+  if (canRelay) {
+    const active =
+      snapshot.relay &&
+      ["waiting", "running", "restoring", "status_unknown"].includes(
+        snapshot.relay.state,
+      );
+    el<HTMLButtonElement>("start-spike").disabled =
+      busy || !limitTarget || Boolean(active);
+    el<HTMLButtonElement>("stop-spike").disabled = busy || !active;
+  }
+  document
+    .querySelectorAll<HTMLButtonElement>(
+      "[data-spike-preset], [data-release-spike]",
+    )
+    .forEach((button) => {
+      button.disabled = busy || !canSpike;
+    });
   document
     .querySelectorAll<HTMLButtonElement>("[data-action]")
     .forEach((button) => {
@@ -619,6 +735,9 @@ function renderDevices(): void {
     devices,
     snapshot.access_policy,
     snapshot.speed_limits,
+    snapshot.latencies,
+    snapshot.spikes,
+    snapshot.block_verification,
     snapshot.gateway,
   ]);
   if (key === renderedDevices) return;
@@ -635,10 +754,45 @@ function renderDevices(): void {
       ? "Try another name, IP address, or MAC address."
       : "Refresh the local neighbor cache, or connect your gateway for a fuller device inventory.";
   el("devices").innerHTML = devices
-    .map(
-      (d) =>
-        `<tr><td><div class="device-name"><span class="device-initial" aria-hidden="true">${d.identity.category.startsWith("Phone") ? "▯" : "▣"}</span><div><strong>${escape(d.identity.display_name ?? d.name)}</strong><small>${escape(d.identity.manufacturer ?? d.identity.mac_kind)}</small>${d.identity.model ? `<small>${escape(d.identity.model)}</small>` : ""}</div></div></td><td>${escape(d.ip)}</td><td class="code">${escape(d.mac)}</td><td>${accessBadge(d.mac)}${speedBadge(d.mac)}<small class="access-observation">${escape(d.presence)}</small></td><td><div class="row-actions"><button class="secondary" data-ping="${escape(d.mac)}" aria-label="Ping ${escape(d.identity.display_name ?? d.name)}">Ping</button><button class="secondary" data-device="${escape(d.mac)}" aria-label="Manage ${escape(d.identity.display_name ?? d.name)}">Details</button><button class="danger" data-action="block" data-mac="${escape(d.mac)}" aria-label="Ban ${escape(d.identity.display_name ?? d.name)}">Ban</button><button class="secondary" data-action="unblock" data-mac="${escape(d.mac)}" aria-label="Unban ${escape(d.identity.display_name ?? d.name)}">Unban</button><button class="secondary row-speed" data-speed="${escape(d.mac)}" aria-label="Speed and latency ${escape(d.identity.display_name ?? d.name)}">Speed &amp; latency</button></div></td></tr>`,
-    )
+    .map((device) => {
+      const name = escape(device.identity.display_name ?? device.name);
+      const mac = escape(device.mac);
+      const symbol = device.identity.category.startsWith("Phone") ? "▯" : "▣";
+      const model = device.identity.model
+        ? `<small>${escape(device.identity.model)}</small>`
+        : "";
+      return `
+      <tr>
+        <td>
+          <div class="device-name">
+            <span class="device-initial" aria-hidden="true">${symbol}</span>
+            <div>
+              <strong>${name}</strong>
+              <small>${escape(device.identity.manufacturer ?? device.identity.mac_kind)}</small>
+              ${model}
+            </div>
+          </div>
+        </td>
+        <td>${escape(device.ip)}</td>
+        <td class="code">${mac}</td>
+        <td>
+          ${accessBadge(device.mac)}
+          ${verificationBadge(device.mac)}
+          ${speedBadge(device.mac)}
+          <small class="access-observation">${escape(device.presence)}</small>
+        </td>
+        <td>
+          <div class="row-actions">
+            <button class="secondary" data-ping="${mac}" aria-label="Ping ${name}">Ping</button>
+            <button class="secondary" data-lag="${mac}" aria-label="Temporary ping increase for ${name}">Ping increase</button>
+            <button class="secondary" data-device="${mac}" aria-label="Manage ${name}">Details</button>
+            <button class="danger" data-action="block" data-mac="${mac}" aria-label="Ban ${name}">Ban</button>
+            <button class="secondary" data-action="unblock" data-mac="${mac}" aria-label="Unban ${name}">Unban</button>
+            <button class="secondary row-speed" data-speed="${mac}" aria-label="Speed and latency ${name}">Speed &amp; latency</button>
+          </div>
+        </td>
+      </tr>`;
+    })
     .join("");
 }
 
@@ -654,12 +808,23 @@ function accessBadge(mac: string): string {
     policy.scope === "forwarding"
       ? "Lantern forwarding policy"
       : "Router blacklist";
+  return `<span class="badge ${banned ? "access-banned" : "access-allowed"}">${banned ? "Banned" : "Not banned"}</span><small class="access-observation" title="${escape(scope)}">Checked ${escape(checked)}</small>`;
+}
+
+function verificationBadge(mac: string): string {
   const verification = snapshot.block_verification;
-  const detail =
-    verification?.mac === mac
-      ? `<small class="access-observation">${verification.status === "checking" ? "Checking Wi-Fi disconnection…" : verification.status === "verified" ? "Wi-Fi disconnection verified" : "Wi-Fi disconnection unconfirmed"}</small>`
-      : "";
-  return `<span class="badge ${banned ? "access-banned" : "access-allowed"}">${banned ? "Banned" : "Not banned"}</span><small class="access-observation" title="${escape(scope)}">Checked ${escape(checked)}</small>${detail}`;
+  if (!verification || verification.mac !== mac) return "";
+  const label =
+    verification.status === "checking"
+      ? "Checking Wi-Fi…"
+      : verification.status === "verified"
+        ? "Wi-Fi disconnection verified"
+        : verification.status === "observed_absent"
+          ? "Absent at last Wi-Fi check"
+          : verification.status === "associated"
+            ? "Still connected or reconnected"
+            : "Wi-Fi check inconclusive";
+  return `<small class="access-observation" title="${escape(verification.message)}">${label}</small>`;
 }
 
 function speedBadge(mac: string): string {
@@ -671,7 +836,17 @@ function speedBadge(mac: string): string {
   const delay = snapshot.latencies?.policies.find(
     (policy) => policy.mac === mac,
   );
-  return `<small class="access-observation">${limit ? `↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps` : "No Lantern speed cap"}</small><small class="access-observation">${snapshot.latencies ? (delay ? `Delay ${delay.delay_ms} ± ${delay.jitter_ms} ms` : "No Lantern delay") : "Delay unknown"}</small>`;
+  const speed = limit
+    ? `↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps`
+    : "No Lantern speed cap";
+  const latency = snapshot.latencies
+    ? delay
+      ? `Delay ${delay.delay_ms} ± ${delay.jitter_ms} ms`
+      : "No Lantern delay"
+    : "Delay unknown";
+  return `
+    <small class="access-observation">${speed}</small>
+    <small class="access-observation">${latency}</small>`;
 }
 
 function openLimit(mac: string): void {
@@ -686,7 +861,9 @@ function openLimit(mac: string): void {
   el("limit-support").textContent =
     snapshot.gateway?.kind === "openwrt"
       ? "Applies to this MAC on its directly connected OpenWrt LAN interface. Requires ip-full, nftables netdev ingress/egress support, and disabled flow offloading. Other devices keep their own budgets."
-      : "Connect an OpenWrt gateway in the device’s traffic path to enforce these limits. The connected Movistar firmware exposes priority controls, without a verified bandwidth-cap API. Local app proxy limits are available under App bandwidth.";
+      : snapshot.gateway?.kind === "movistar" && snapshot.platform === "macos"
+        ? "Movistar has no verified delay control. A temporary ping increase can instead relay this device’s traffic through this Mac; speed caps still require OpenWrt."
+        : "Connect an OpenWrt gateway in the device’s traffic path to control device speed or ping. Local app proxy limits are available under App bandwidth.";
   const form = el<HTMLFormElement>("limit-form");
   field(form, "down").value = String(limit ? limit.down_kbps / 1000 : 10);
   field(form, "up").value = String(limit ? limit.up_kbps / 1000 : 10);
@@ -696,9 +873,190 @@ function openLimit(mac: string): void {
   const delayForm = el<HTMLFormElement>("latency-form");
   field(delayForm, "delay").value = String(delay?.delay_ms ?? 100);
   field(delayForm, "jitter").value = String(delay?.jitter_ms ?? 0);
+  renderSpikes();
   modal("limit-dialog").showModal();
+  modal("limit-dialog").scrollTop = 0;
   applyCapabilities();
 }
+
+function renderSpikes(): void {
+  const result = el("spike-results");
+  if (snapshot.gateway?.kind === "movistar" && snapshot.platform === "macos") {
+    el("spike-description").textContent =
+      "Temporarily relays this device’s IPv4 traffic and, when its IPv6 gateway and neighbor are known, IPv6 traffic through this Mac. Administrator authentication is required. A watchdog sends recovery frames afterward; if the Mac loses power, reconnect the device’s Wi-Fi if needed.";
+    const relay = snapshot.relay;
+    if (!relay) {
+      result.textContent =
+        "Prepare the relay, then run the displayed command in Terminal. Keep this Mac on during the test.";
+      return;
+    }
+    const remaining =
+      relay.remaining_s !== null
+        ? ` · ${relay.remaining_s} seconds remaining`
+        : "";
+    const detail = relay.forwarded
+      ? `<p>
+          ${relay.forwarded_ipv4 ?? 0} IPv4 and ${relay.forwarded_ipv6 ?? 0} IPv6 packets relayed ·
+          average hold ${relay.avg_hold_ms ?? "?"} ms · ${relay.dropped ?? 0} dropped${remaining}.
+          This is relay timing, not a game-server RTT measurement.
+        </p>`
+      : "";
+    const ipv6 = relay.ipv6_available
+      ? "IPv6 gateway and target identified; packets must be observed to verify the delay."
+      : "IPv6 unavailable: no matching IPv6 gateway and target neighbor were found. IPv6 traffic will not be delayed.";
+    const command =
+      relay.state === "waiting"
+        ? `<label for="relay-command">Run in Terminal; enter your Mac password there, not in Lantern</label>
+           <textarea id="relay-command" rows="3" readonly>${escape(relay.command)}</textarea>
+           <button class="secondary" type="button" id="copy-relay-command">Copy command</button>`
+        : "";
+    const html = `<p>${relay.mac === limitTarget ? "This device" : escape(relay.mac)}: ${escape(relay.message)}</p><p>${ipv6}</p>${detail}${command}`;
+    if (
+      result.innerHTML !== html &&
+      document.activeElement?.id !== "relay-command"
+    )
+      result.innerHTML = html;
+    return;
+  }
+  el("spike-description").textContent =
+    "Adds delay to traffic from the gateway to this device. The gateway ends the effect automatically, even if Lantern closes. Requires OpenWrt, disabled offloading, and an unused LAN root queue.";
+  if (snapshot.gateway?.kind !== "openwrt") {
+    result.textContent =
+      "Connect an OpenWrt gateway to use temporary ping increases.";
+    return;
+  }
+  if (!snapshot.spikes) {
+    result.textContent =
+      "Lag status is unknown. Refresh status before making changes.";
+    return;
+  }
+  const spikes = snapshot.spikes.spikes;
+  if (!spikes.length) {
+    result.textContent = "No temporary lag queue is installed.";
+    return;
+  }
+  result.innerHTML = spikes
+    .map((spike) =>
+      spike.mac
+        ? `<p>${spike.mac === limitTarget ? "This device" : escape(spike.mac)}: +${spike.delay_ms ?? "?"} ms · ${spike.remaining_s ?? "?"} seconds remaining at last check.</p>`
+        : `<p>Inactive lag queue on ${escape(spike.interface)}. Release it to use another latency queue.</p><button class="secondary" type="button" data-release-spike="${escape(spike.interface)}">Release ${escape(spike.interface)} queue</button>`,
+    )
+    .join("");
+}
+
+function scheduleSpikeCheck(): void {
+  const active =
+    snapshot.spikes?.spikes.filter(
+      (spike) => spike.mac && spike.remaining_s !== null,
+    ) ?? [];
+  const key = JSON.stringify(active);
+  if (key === spikeTimerKey) return;
+  spikeTimerKey = key;
+  if (spikeTimer !== undefined) window.clearTimeout(spikeTimer);
+  if (!active.length) return;
+  const check = async (): Promise<void> => {
+    if (busy) {
+      spikeTimer = window.setTimeout(() => void check(), 2000);
+      return;
+    }
+    try {
+      const result = await api<SpikeResponse>("spikes", "POST", {});
+      spikeTimerKey = "";
+      await sync();
+      if (
+        !result.spikes.some(
+          (spike) =>
+            spike.mac && active.some((previous) => previous.mac === spike.mac),
+        )
+      )
+        notice("The temporary ping increase has ended on the gateway.");
+    } catch (error) {
+      notice(
+        error instanceof Error
+          ? `Could not refresh lag status: ${error.message}`
+          : "Could not refresh lag status.",
+        true,
+      );
+    }
+  };
+  const remaining = Math.min(...active.map((spike) => spike.remaining_s ?? 0));
+  spikeTimer = window.setTimeout(() => void check(), (remaining + 2) * 1000);
+}
+
+const spikeForm = el<HTMLFormElement>("spike-form");
+const spikeSlider = el<HTMLInputElement>("spike-strength");
+spikeSlider.addEventListener("input", () => {
+  field(spikeForm, "delay").value = spikeSlider.value;
+});
+field(spikeForm, "delay").addEventListener("input", () => {
+  spikeSlider.value = field(spikeForm, "delay").value;
+});
+spikeForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (busy || !limitTarget || !snapshot.gateway) return;
+  const mac = limitTarget;
+  if (snapshot.gateway.kind === "movistar" && snapshot.platform === "macos") {
+    void operation(
+      async () =>
+        (
+          await api<RelayResponse>("device/relay", "POST", {
+            mac,
+            delay_ms: Number(field(spikeForm, "delay").value),
+            jitter_ms: 0,
+            duration_s: Number(field(spikeForm, "duration").value),
+          })
+        ).message,
+      "Checking the target and preparing the Mac relay…",
+      false,
+    );
+    return;
+  }
+  if (snapshot.gateway.kind !== "openwrt") return;
+  void operation(async () => {
+    const result = await api<SpikeResponse>("device/spike", "POST", {
+      mac,
+      delay_ms: Number(field(spikeForm, "delay").value),
+      jitter_ms: 0,
+      duration_s: Number(field(spikeForm, "duration").value),
+    });
+    return result.message;
+  }, "Installing a timed ping increase on the gateway…");
+});
+el("stop-spike").addEventListener("click", () => {
+  if (busy || !limitTarget || !snapshot.gateway) return;
+  if (snapshot.gateway.kind === "movistar" && snapshot.platform === "macos") {
+    void operation(
+      async () =>
+        (await api<Mutation>("device/relay/stop", "POST", {})).message,
+      "Stopping the relay and restoring the device’s gateway…",
+      false,
+    );
+    return;
+  }
+  if (snapshot.gateway.kind !== "openwrt") return;
+  const mac = limitTarget;
+  void operation(
+    async () =>
+      (await api<SpikeResponse>("device/spike/stop", "POST", { mac })).message,
+    "Stopping the temporary ping increase…",
+  );
+});
+el("refresh-spikes").addEventListener("click", () => {
+  if (snapshot.gateway?.kind === "movistar" && snapshot.platform === "macos") {
+    void operation(
+      async () => {
+        await sync();
+        return snapshot.relay?.message ?? "No relay is prepared.";
+      },
+      undefined,
+      false,
+    );
+    return;
+  }
+  void operation(
+    async () => (await api<SpikeResponse>("spikes", "POST", {})).message,
+  );
+});
 
 el("limit-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -809,12 +1167,43 @@ el("inspect-limits").addEventListener("click", () => {
     } catch (error) {
       delayError = String(error);
     }
+    const limitsHtml = result?.limits.length
+      ? result.limits
+          .map(
+            (limit) => `
+          <div class="rule">
+            <div>
+              <strong class="code">${escape(limit.mac)}</strong>
+              <p>↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps · ${escape(limit.interface)}</p>
+              <p>Dropped: ↑ ${bytes(limit.up_dropped_bytes)} · ↓ ${bytes(limit.down_dropped_bytes)}</p>
+            </div>
+            <button class="secondary" data-speed="${escape(limit.mac)}">Edit / remove</button>
+          </div>`,
+          )
+          .join("")
+      : "<p>No Lantern device speed caps are installed.</p>";
     el("limit-list-results").innerHTML = result
-      ? `<p>${escape(result.message)}</p>${result.limits.length ? result.limits.map((limit) => `<div class="rule"><div><strong class="code">${escape(limit.mac)}</strong><p>↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps · ${escape(limit.interface)}</p><p>Dropped: ↑ ${bytes(limit.up_dropped_bytes)} · ↓ ${bytes(limit.down_dropped_bytes)}</p></div><button class="secondary" data-speed="${escape(limit.mac)}">Edit / remove</button></div>`).join("") : "<p>No Lantern device speed caps are installed.</p>"}`
+      ? `<p>${escape(result.message)}</p>${limitsHtml}`
       : `<p>Speed caps could not be read: ${escape(speedError)}</p>`;
+    const delaysHtml = delays
+      ? delays.policies.length
+        ? delays.policies
+            .map(
+              (policy) => `
+            <div class="rule">
+              <div>
+                <strong class="code">${escape(policy.mac)}</strong>
+                <p>${policy.delay_ms} ± ${policy.jitter_ms} ms · ${escape(policy.interface)} · ${policy.packets} packets, ${policy.drops} dropped</p>
+              </div>
+              <button class="secondary" data-speed="${escape(policy.mac)}">Edit / remove</button>
+            </div>`,
+            )
+            .join("")
+        : "<p>No Lantern device delays are installed.</p>"
+      : `<p>Delays could not be read: ${escape(delayError)}</p>`;
     el("limit-list-results").insertAdjacentHTML(
       "beforeend",
-      `<h3>Added latency</h3>${delays ? (delays.policies.length ? delays.policies.map((policy) => `<div class="rule"><div><strong class="code">${escape(policy.mac)}</strong><p>${policy.delay_ms} ± ${policy.jitter_ms} ms · ${escape(policy.interface)} · ${policy.packets} packets, ${policy.drops} dropped</p></div><button class="secondary" data-speed="${escape(policy.mac)}">Edit / remove</button></div>`).join("") : "<p>No Lantern device delays are installed.</p>") : `<p>Delays could not be read: ${escape(delayError)}</p>`}`,
+      `<h3>Added latency</h3>${delaysHtml}`,
     );
     modal("limit-list-dialog").showModal();
     return speedError || delayError
@@ -848,8 +1237,13 @@ async function pingDevice(mac: string): Promise<void> {
         ? ping.roundtrip_ms.reduce((sum, time) => sum + time, 0) /
           ping.roundtrip_ms.length
         : null;
-      el("ping-results").innerHTML =
-        `<div class="ping-metrics"><div><span>Replies</span><strong>${ping.received} / ${ping.sent}</strong></div><div><span>Packet loss</span><strong>${ping.loss_percent.toFixed(0)}%</strong></div><div><span>Average RTT</span><strong>${average === null ? "—" : `${average.toFixed(2)} ms`}</strong></div></div><p>${ping.received ? "ICMP replies received" : "No ICMP replies"} · ${escape(new Date().toLocaleTimeString())}</p>${ping.roundtrip_ms.length ? `<div class="ping-samples">${ping.roundtrip_ms.map((time) => `<span>${time.toFixed(2)} ms</span>`).join("")}</div>` : ""}`;
+      el("ping-results").innerHTML = `<div class="ping-metrics">
+          <div><span>Replies</span><strong>${ping.received} / ${ping.sent}</strong></div>
+          <div><span>Packet loss</span><strong>${ping.loss_percent.toFixed(0)}%</strong></div>
+          <div><span>Average RTT</span><strong>${average === null ? "—" : `${average.toFixed(2)} ms`}</strong></div>
+        </div>
+        <p>${ping.received ? "ICMP replies received" : "No ICMP replies"} · ${escape(new Date().toLocaleTimeString())}</p>
+        ${ping.roundtrip_ms.length ? `<div class="ping-samples">${ping.roundtrip_ms.map((time) => `<span>${time.toFixed(2)} ms</span>`).join("")}</div>` : ""}`;
       return result.message;
     } catch (error) {
       el("ping-results").textContent =
@@ -881,8 +1275,25 @@ function renderProfiles(): void {
   el("profile-empty").hidden = snapshot.profiles.length > 0;
   el("profiles").innerHTML = snapshot.profiles
     .map(
-      (p) =>
-        `<article class="profile"><div class="profile-heading"><h3>${escape(p.name)}</h3><span class="badge">Proxy listening</span></div><div class="proxy-address">SOCKS5 · 127.0.0.1:${p.port}</div><small>Set this address in your app’s proxy settings.</small><div class="profile-limits"><div><span>↓ Download limit</span><strong>${p.down_kbps / 1000} <small>Mbps</small></strong></div><div><span>↑ Upload limit</span><strong>${p.up_kbps / 1000} <small>Mbps</small></strong></div></div><small>${p.active} active connections · ${bytes(p.downloaded)} received · ${bytes(p.uploaded)} sent</small><p class="footnote">${p.failures} failed or rejected connections</p><div class="profile-actions"><button class="secondary" data-edit-profile="${p.id}">Edit limits</button><button class="text-button" data-stop-profile="${p.id}">Stop proxy</button></div></article>`,
+      (p) => `
+        <article class="profile">
+          <div class="profile-heading">
+            <h3>${escape(p.name)}</h3>
+            <span class="badge">Proxy listening</span>
+          </div>
+          <div class="proxy-address">SOCKS5 · 127.0.0.1:${p.port}</div>
+          <small>Set this address in your app’s proxy settings.</small>
+          <div class="profile-limits">
+            <div><span>↓ Download limit</span><strong>${p.down_kbps / 1000} <small>Mbps</small></strong></div>
+            <div><span>↑ Upload limit</span><strong>${p.up_kbps / 1000} <small>Mbps</small></strong></div>
+          </div>
+          <small>${p.active} active connections · ${bytes(p.downloaded)} received · ${bytes(p.uploaded)} sent</small>
+          <p class="footnote">${p.failures} failed or rejected connections</p>
+          <div class="profile-actions">
+            <button class="secondary" data-edit-profile="${p.id}">Edit limits</button>
+            <button class="text-button" data-stop-profile="${p.id}">Stop proxy</button>
+          </div>
+        </article>`,
     )
     .join("");
 }
@@ -894,8 +1305,12 @@ function renderEvents(): void {
   el("events").innerHTML = snapshot.events.length
     ? snapshot.events
         .map(
-          (e) =>
-            `<div class="event"><time datetime="${new Date(e.at * 1000).toISOString()}">${escape(new Date(e.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }))}</time><span class="badge ${e.outcome.startsWith("failed") ? "failed" : ""}">${escape(e.outcome.replaceAll("_", " "))}</span><div>${escape(e.message)}</div></div>`,
+          (e) => `
+            <div class="event">
+              <time datetime="${new Date(e.at * 1000).toISOString()}">${escape(new Date(e.at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }))}</time>
+              <span class="badge ${e.outcome.startsWith("failed") ? "failed" : ""}">${escape(e.outcome.replaceAll("_", " "))}</span>
+              <div>${escape(e.message)}</div>
+            </div>`,
         )
         .join("")
     : '<div class="empty"><h3>No activity yet</h3><p>Gateway requests and app proxy changes will appear here.</p></div>';
@@ -962,13 +1377,43 @@ function openDevice(mac: string): void {
   if (!d) return;
   const supported = snapshot.gateway?.kind === "openwrt";
   el("selected-name").textContent = d.identity.display_name ?? d.name;
-  el("selected-device").innerHTML =
-    `<dl class="device-facts"><dt>IP address</dt><dd>${escape(d.ip)}</dd><dt>MAC address</dt><dd class="code">${escape(d.mac)}</dd><dt>Source</dt><dd>${escape(d.source)}</dd><dt>Observation</dt><dd>${escape(d.presence)}</dd></dl>${supported ? `<p>Disconnect removes a Wi-Fi association for 60 seconds. A forwarding block prevents routed traffic matching this MAC; it does not turn off the device’s Wi-Fi.</p><div class="device-controls"><button class="danger" data-action="block" data-mac="${escape(mac)}">Block forwarding</button><button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Remove block</button><button class="secondary" data-action="kick" data-mac="${escape(mac)}">Disconnect Wi-Fi</button></div><div class="form-help">Gateway rules expire on reboot. Hardware offloading may bypass forwarding rules. Inspect counters to see whether traffic was dropped.</div>` : `<div class="form-help">${snapshot.gateway ? "This Movistar firmware has no verified automatic enforcement adapter. Use its router administration page for access controls." : "Connect an OpenWrt gateway to enable access controls. Local neighbor discovery cannot enforce network policy."}</div>`}`;
+  const deviceControls = supported
+    ? `
+      <p>Disconnect removes a Wi-Fi association for 60 seconds. A forwarding block prevents routed traffic matching this MAC; it does not turn off the device’s Wi-Fi.</p>
+      <div class="device-controls">
+        <button class="danger" data-action="block" data-mac="${escape(mac)}">Block forwarding</button>
+        <button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Remove block</button>
+        <button class="secondary" data-action="kick" data-mac="${escape(mac)}">Disconnect Wi-Fi</button>
+      </div>
+      <div class="form-help">Gateway rules expire on reboot. Hardware offloading may bypass forwarding rules. Inspect counters to see whether traffic was dropped.</div>`
+    : `<div class="form-help">${snapshot.gateway ? "This Movistar firmware has no verified automatic enforcement adapter. Use its router administration page for access controls." : "Connect an OpenWrt gateway to enable access controls. Local neighbor discovery cannot enforce network policy."}</div>`;
+  el("selected-device").innerHTML = `
+    <dl class="device-facts">
+      <dt>IP address</dt><dd>${escape(d.ip)}</dd>
+      <dt>MAC address</dt><dd class="code">${escape(d.mac)}</dd>
+      <dt>Source</dt><dd>${escape(d.source)}</dd>
+      <dt>Observation</dt><dd>${escape(d.presence)}</dd>
+    </dl>
+    ${deviceControls}`;
   modal("device-dialog").showModal();
   const details = document.createElement("section");
   details.className = "identity-details";
   const identity = d.identity;
-  details.innerHTML = `<h3>Device identification</h3><dl class="device-facts"><dt>Manufacturer</dt><dd>${escape(identity.manufacturer ?? "Not established")}</dd><dt>MAC type</dt><dd>${escape(identity.mac_kind)}</dd><dt>Device type</dt><dd>${escape(identity.category)}</dd><dt>Hostname</dt><dd>${escape(identity.hostname ?? "Not advertised")}</dd><dt>Model</dt><dd>${escape(identity.model ?? "Not advertised")}</dd><dt>Firmware</dt><dd>${escape(identity.firmware ?? "Not exposed by this device")}</dd></dl>${identity.services.length ? `<h3>Advertised services</h3><ul>${identity.services.map((service) => `<li>${escape(service)}</li>`).join("")}</ul>` : ""}<h3>Identification evidence</h3><ul>${identity.evidence.map((item) => `<li>${escape(item)}</li>`).join("")}</ul><p>Names, models, and versions are device-reported. A manufacturer prefix identifies the network interface, not necessarily the device brand.</p><button class="primary" data-identify="${escape(mac)}">${identity.inspected_at ? "Inspect device again" : "Inspect hostname, model & services"}</button>`;
+  details.innerHTML = `
+    <h3>Device identification</h3>
+    <dl class="device-facts">
+      <dt>Manufacturer</dt><dd>${escape(identity.manufacturer ?? "Not established")}</dd>
+      <dt>MAC type</dt><dd>${escape(identity.mac_kind)}</dd>
+      <dt>Device type</dt><dd>${escape(identity.category)}</dd>
+      <dt>Hostname</dt><dd>${escape(identity.hostname ?? "Not advertised")}</dd>
+      <dt>Model</dt><dd>${escape(identity.model ?? "Not advertised")}</dd>
+      <dt>Firmware</dt><dd>${escape(identity.firmware ?? "Not exposed by this device")}</dd>
+    </dl>
+    ${identity.services.length ? `<h3>Advertised services</h3><ul>${identity.services.map((service) => `<li>${escape(service)}</li>`).join("")}</ul>` : ""}
+    <h3>Identification evidence</h3>
+    <ul>${identity.evidence.map((item) => `<li>${escape(item)}</li>`).join("")}</ul>
+    <p>Names, models, and versions are device-reported. A manufacturer prefix identifies the network interface, not necessarily the device brand.</p>
+    <button class="primary" data-identify="${escape(mac)}">${identity.inspected_at ? "Inspect device again" : "Inspect hostname, model & services"}</button>`;
   el("selected-device").prepend(details);
   if (identity.operating_system) {
     const operating = document.createElement("p");
@@ -988,7 +1433,23 @@ function openDevice(mac: string): void {
     el("selected-device").querySelector(":scope > .form-help")?.remove();
     const controls = document.createElement("section");
     const listed = snapshot.access_policy?.blocked_macs.includes(mac);
-    controls.innerHTML = `<h3>Movistar device controls</h3><p>Block stores this MAC in the router’s blacklist, disconnects it, and verifies the policy and both Wi-Fi radios. The policy remains after Lantern closes. A device using another MAC or access point is outside this block.</p><p>${listed ? (snapshot.access_policy?.enabled ? "Last policy read: this MAC is blocked." : "Last policy read: this MAC is listed, but blacklist mode is disabled.") : "Inspect gateway rules to read the current blacklist."}</p>${snapshot.gateway.ssh_fingerprint ? `<div class="device-controls"><button class="danger" data-action="block" data-mac="${escape(mac)}">Block until unblocked</button><button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Unblock</button><button class="secondary" data-action="kick" data-mac="${escape(mac)}">Disconnect once</button></div>` : "<p>Enable SSH controls in Gateway settings by inspecting and trusting the router’s host identity.</p>"}`;
+    const policyMessage = listed
+      ? snapshot.access_policy?.enabled
+        ? "Last policy read: this MAC is blocked."
+        : "Last policy read: this MAC is listed, but blacklist mode is disabled."
+      : "Inspect gateway rules to read the current blacklist.";
+    const actions = snapshot.gateway.ssh_fingerprint
+      ? `<div class="device-controls">
+          <button class="danger" data-action="block" data-mac="${escape(mac)}">Block until unblocked</button>
+          <button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Unblock</button>
+          <button class="secondary" data-action="kick" data-mac="${escape(mac)}">Disconnect once</button>
+        </div>`
+      : "<p>Enable SSH controls in Gateway settings by inspecting and trusting the router’s host identity.</p>";
+    controls.innerHTML = `
+      <h3>Movistar device controls</h3>
+      <p>Block stores this MAC in the router’s blacklist, disconnects it, and verifies the policy and both Wi-Fi radios. The policy remains after Lantern closes. A device using another MAC or access point is outside this block.</p>
+      <p>${policyMessage}</p>
+      ${actions}`;
     el("selected-device").append(controls);
   }
 }
@@ -1038,6 +1499,7 @@ async function actOnDevice(mac: string, action: string): Promise<void> {
           ? `Block routed traffic from ${mac} at this gateway. Existing offloaded connections may continue. You can remove this rule later.`
           : `Remove Lantern’s forwarding block for ${mac}. Other router restrictions remain in place.`;
   if (
+    action !== "kick" &&
     !(await confirmAction(
       action === "unblock"
         ? movistar
@@ -1075,9 +1537,12 @@ async function actOnDevice(mac: string, action: string): Promise<void> {
       modal("rules-dialog").close();
       return result.message;
     },
-    movistar && action !== "kick"
-      ? "Updating the router blacklist and verifying the result. Router configuration writes can take a minute."
-      : undefined,
+    action === "kick"
+      ? "Sending a temporary Wi-Fi disconnect…"
+      : movistar
+        ? "Updating the router blacklist and verifying the result. Router configuration writes can take a minute."
+        : undefined,
+    !(movistar && action === "kick"),
   );
 }
 
@@ -1132,9 +1597,34 @@ el("router-information").addEventListener("click", () => {
     const result = await api<Mutation>("router/inspect", "POST");
     await sync();
     const info = snapshot.router_info;
-    el("router-info-results").innerHTML = info
-      ? `<dl class="device-facts"><dt>Router model</dt><dd>${escape(info.model ?? "Not advertised")}</dd><dt>Firmware</dt><dd>${escape(info.firmware ?? "Not exposed in this session")}</dd><dt>Radios read</dt><dd>${info.radios_read} of 2</dd></dl><h3>Current Wi-Fi associations</h3>${info.stations.map((station) => `<div class="radio-evidence"><strong class="code">${escape(station.mac)}</strong><p>${escape(station.radio)} · ${escape(station.ssid)} · ${station.authorized ? "Authorized" : "Not authorized"}${station.signal_dbm !== null ? ` · ${station.signal_dbm} dBm` : ""}</p></div>`).join("")}${info.diagnostics.length ? `<h3>Diagnostics</h3><ul>${info.diagnostics.map((message) => `<li>${escape(message)}</li>`).join("")}</ul>` : ""}`
-      : "<p>No router evidence was returned.</p>";
+    if (info) {
+      const stations = info.stations
+        .map(
+          (station) => `
+        <div class="radio-evidence">
+          <strong class="code">${escape(station.mac)}</strong>
+          <p>${escape(station.radio)} · ${escape(station.ssid)} ·
+            ${station.authorized ? "Authorized" : "Not authorized"}${station.signal_dbm !== null ? ` · ${station.signal_dbm} dBm` : ""}
+          </p>
+        </div>`,
+        )
+        .join("");
+      const diagnostics = info.diagnostics.length
+        ? `<h3>Diagnostics</h3><ul>${info.diagnostics.map((message) => `<li>${escape(message)}</li>`).join("")}</ul>`
+        : "";
+      el("router-info-results").innerHTML = `
+        <dl class="device-facts">
+          <dt>Router model</dt><dd>${escape(info.model ?? "Not advertised")}</dd>
+          <dt>Firmware</dt><dd>${escape(info.firmware ?? "Not exposed in this session")}</dd>
+          <dt>Radios read</dt><dd>${info.radios_read} of 2</dd>
+        </dl>
+        <h3>Current Wi-Fi associations</h3>
+        ${stations}
+        ${diagnostics}`;
+    } else {
+      el("router-info-results").innerHTML =
+        "<p>No router evidence was returned.</p>";
+    }
     if (snapshot.gateway?.ssh_fingerprint)
       el("router-info-results").insertAdjacentHTML(
         "beforeend",
@@ -1198,6 +1688,25 @@ document.addEventListener("click", (event) => {
       ? event.target.closest<HTMLButtonElement>("button")
       : null;
   if (!button || busy) return;
+  if (button.id === "copy-relay-command") {
+    const command = el<HTMLTextAreaElement>("relay-command").value;
+    if (!navigator.clipboard)
+      notice("Select and copy the command shown above.", true);
+    else
+      void navigator.clipboard
+        .writeText(command)
+        .then(() =>
+          notice(
+            "Command copied. Run it in Terminal and enter your Mac password there.",
+          ),
+        )
+        .catch(() =>
+          notice(
+            "Could not copy automatically. Select and copy the command shown above.",
+            true,
+          ),
+        );
+  }
   if (button.id === "read-blacklist")
     void operation(async () => {
       const result = await api<{
@@ -1219,7 +1728,34 @@ document.addEventListener("click", (event) => {
     identify,
     ping,
     speed,
+    lag,
+    spikePreset,
+    releaseSpike,
   } = button.dataset;
+  if (spikePreset) {
+    field(spikeForm, "delay").value = spikePreset;
+    spikeSlider.value = spikePreset;
+  }
+  if (releaseSpike)
+    void (async () => {
+      if (
+        !(await confirmAction(
+          "Release the inactive lag queue?",
+          `Release Lantern's unused queue on ${releaseSpike}. Active spikes cannot be released.`,
+          "Release queue",
+        ))
+      )
+        return;
+      await operation(
+        async () =>
+          (
+            await api<SpikeResponse>("device/spike/release", "POST", {
+              interface: releaseSpike,
+            })
+          ).message,
+      );
+    })();
+  if (lag) openLimit(lag);
   if (speed) openLimit(speed);
   if (ping) void pingDevice(ping);
   if (identify)
@@ -1275,11 +1811,20 @@ el("inspect-rules").addEventListener("click", () => {
                     : info.radios_read === 2
                       ? "Absent from both Wi-Fi radios at this read."
                       : "Radio verification incomplete; connection state unknown.";
-                  return `<div class="rule"><div><strong class="code">${escape(mac)}</strong><p>${escape(evidence)}</p></div><button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Unblock</button></div>`;
+                  return `
+                    <div class="rule">
+                      <div>
+                        <strong class="code">${escape(mac)}</strong>
+                        <p>${escape(evidence)}</p>
+                      </div>
+                      <button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Unblock</button>
+                    </div>`;
                 })
                 .join("")
             : "<p>No addresses in the router blacklist.</p>"
-        }<p>These are router policies, including entries created outside Lantern. Unblock removes only the selected address. A missing Wi-Fi association does not prove anything about Ethernet or another access point.</p><button class="secondary" id="verify-blocks">Verify again</button>`;
+        }
+        <p>These are router policies, including entries created outside Lantern. Unblock removes only the selected address. A missing Wi-Fi association does not prove anything about Ethernet or another access point.</p>
+        <button class="secondary" id="verify-blocks">Verify again</button>`;
       modal("rules-dialog").showModal();
       return "Blacklist and both-radio verification refreshed from the router.";
     }
@@ -1292,7 +1837,14 @@ el("inspect-rules").addEventListener("click", () => {
                 ? rule.comment.slice(8)
                 : null;
               const counter = rule.expr?.find((expr) => expr.counter)?.counter;
-              return `<div class="rule"><div><strong class="code">${escape(mac ?? "Unrecognized rule")}</strong><p>${counter ? `${counter.packets} packets · ${bytes(counter.bytes)} dropped` : "No traffic counters available"}</p></div>${mac ? `<button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Remove block</button>` : ""}</div>`;
+              return `
+                <div class="rule">
+                  <div>
+                    <strong class="code">${escape(mac ?? "Unrecognized rule")}</strong>
+                    <p>${counter ? `${counter.packets} packets · ${bytes(counter.bytes)} dropped` : "No traffic counters available"}</p>
+                  </div>
+                  ${mac ? `<button class="secondary" data-action="unblock" data-mac="${escape(mac)}">Remove block</button>` : ""}
+                </div>`;
             })
             .join("")
         : '<div class="empty"><h3>No Lantern blocks installed</h3></div>'

@@ -522,9 +522,16 @@ pub async fn block(config: &RouterConfig, mac: &str, blocked: bool) -> Result<Va
     {
         return Err("A rule with this marker exists, but its live match, drop action, or forward hook differs. Enforcement is unverified; inspect and remove the rule before retrying.".into());
     }
-    Ok(
-        json!({"outcome": "rule_verified", "message": if blocked {"Forwarding block installed and read back. Wi-Fi may remain connected; hardware-offloaded traffic may bypass this rule. Rules expire on reboot."} else {"Lantern forwarding rule removed and absence verified."}, "evidence": observed}),
-    )
+    let message = if blocked {
+        "Forwarding block installed and read back. Wi-Fi may remain connected; hardware-offloaded traffic may bypass this rule. Rules expire on reboot."
+    } else {
+        "Lantern forwarding rule removed and absence verified."
+    };
+    Ok(json!({
+        "outcome": "rule_verified",
+        "message": message,
+        "evidence": observed,
+    }))
 }
 
 pub async fn kick(config: &RouterConfig, mac: &str) -> Result<Value> {

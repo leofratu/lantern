@@ -66,9 +66,9 @@ dialog {
 }
 .row-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(60px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-  min-width: 140px;
+  min-width: 0;
 }
 .row-speed {
   grid-column: 1 / -1;
@@ -141,8 +141,11 @@ dialog {
 }
 .row-actions button {
   font-size: 11px;
-  padding: 7px 10px;
-  white-space: nowrap;
+  min-width: 0;
+  padding: 7px 6px;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .ping-metrics {
   display: grid;
@@ -175,6 +178,14 @@ dialog {
     monospace;
 }
 @media (max-width: 480px) {
+  .device-table tr {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .device-table td:last-child {
+    grid-column: 1;
+    grid-row: auto;
+    margin-top: 8px;
+  }
   .ping-metrics {
     gap: 8px;
   }

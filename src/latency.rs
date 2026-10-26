@@ -45,10 +45,10 @@ fn check_gateway(config: &RouterConfig) -> Result<()> {
     }
     Ok(())
 }
-fn encoded(interface: &str) -> String {
+pub(crate) fn encoded(interface: &str) -> String {
     interface.bytes().map(|b| format!("{b:02x}")).collect()
 }
-fn decode(value: &str) -> Result<String> {
+pub(crate) fn decode(value: &str) -> Result<String> {
     if value.is_empty()
         || value.len() > 30
         || !value.len().is_multiple_of(2)
@@ -66,7 +66,7 @@ fn decode(value: &str) -> Result<String> {
     limits::interface_name(&interface)?;
     Ok(interface)
 }
-async fn qdiscs(config: &RouterConfig, interface: &str) -> Result<Vec<Value>> {
+pub(crate) async fn qdiscs(config: &RouterConfig, interface: &str) -> Result<Vec<Value>> {
     serde_json::from_str(&ssh(config, &format!("tc -j -s qdisc show dev {interface}")).await?)
         .map_err(|_| "OpenWrt needs tc-full with JSON support".into())
 }
@@ -301,7 +301,13 @@ pub async fn set(config: &RouterConfig, input: &DelayInput, ip: Option<&str>) ->
         .await
         .map_err(|e| format!("Delay removed, but empty queue cleanup is unknown: {e}"))?;
     }
-    Ok(
-        json!({"policies":after,"message":if input.delay_ms == 0 {"Device delay removed and verified."} else {"Device delay installed and verified. Actual ping varies; the policy clears on gateway reboot."}}),
-    )
+    let message = if input.delay_ms == 0 {
+        "Device delay removed and verified."
+    } else {
+        "Device delay installed and verified. Actual ping varies; the policy clears on gateway reboot."
+    };
+    Ok(json!({
+        "policies": after,
+        "message": message,
+    }))
 }

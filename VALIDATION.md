@@ -9,7 +9,7 @@ This file distinguishes automated checks, live router observations, and unverifi
 | Strict TypeScript type checking and compilation | macOS, TypeScript 5.9 | Passed |
 | Frontend formatting check | Prettier, source HTML/CSS/TypeScript/configuration | Passed |
 | Rust formatting and Clippy with warnings denied | Isolated Linux x86-64 runner | Passed |
-| Rust tests | Linux x86-64 | 14 passed |
+| Rust tests | Linux x86-64 | 18 passed |
 | Real-service API smoke tests | Linux x86-64 and optimized native Apple Silicon macOS executable | 3 passed on each |
 | Real nftables namespace integration | Isolated Linux user/network namespace | Passed |
 | Device rate-cap integration | Isolated Linux bridge, ingress/egress hooks, real Ethernet traffic | Passed |
@@ -51,6 +51,12 @@ The native macOS ping endpoint and dialog were exercised against observed device
 The OpenWrt speed-cap adapter was tested with a real isolated Linux bridge, virtual Ethernet pair, and packets matching synthetic client MACs. Ingress upload and egress download counters showed excess-byte drops. A different MAC did not consume the selected client's budget. Tests cover asymmetric caps, numeric unit normalization, idempotent updates, removal after the device disappears, unrelated-table preservation, offload refusal, malformed rule rejection, and ownership rejection. Kernel rule readback is not a physical router throughput benchmark.
 
 The tested nftables version omits netdev device bindings from JSON, so the adapter checks the canonical text device binding as well. Both numeric-priority text bindings and actual JSON rate/burst units are exercised by the namespace integration.
+
+The timed ping-increase adapter was exercised on an isolated Linux bridge with two synthetic clients. A 350 ms, 60-second spike increased the selected client's ping while the other remained unaffected. Lantern was terminated during the spike; the gateway's nftables timeout expired and ping returned to baseline. Separate checks covered early stop, queue release, rejection of altered rules and refusal to replace an existing root queue. This was not a live test on BEAST or a physical OpenWrt gateway; the connected Movistar firmware has no verified delay control.
+
+The temporary Mac relay's IPv4 path was exercised on BEAST through the Movistar network: one run relayed 946 IPv4 packets with a 499 ms average hold and reported no drops. It sent restoration frames at the end; the observation did not independently prove BEAST accepted them or measure game-server RTT. The Mac had no IPv6 default route during development, so the IPv6 path has not been verified on that network.
+
+In disposable Linux network namespaces, the dual-stack relay increased the selected synthetic client's IPv4 and IPv6 ping by about 350 ms after neighbor entries converged; another client stayed unaffected. Both protocols returned to baseline after expiration, explicit stop, and forced relay or watchdog termination. An IPv4-only run left IPv6 unaffected. These tests do not prove physical macOS IPv6 injection or recovery; some initial IPv4 packets bypassed the relay while the neighbor entry changed.
 
 Live identification resolved network-interface manufacturers for globally assigned MACs, declined manufacturer guesses for private MACs, discovered the local Mac's hostname/model/OS, and exposed a conflict between a router label and an mDNS hostname. No live inventory fixture is committed. Firmware fields are populated only from explicit device metadata.
 

@@ -400,9 +400,16 @@ pub async fn set(config: &RouterConfig, input: &LimitInput, ip: Option<&str>) ->
             );
         }
     }
-    Ok(
-        json!({"outcome":"rate_policy_verified","limits":after,"message":if input.up_kbps == 0 {"Device speed cap removed and absence verified. Other limits were preserved."} else {"Both device rate policies installed and read back. Excess traffic is dropped above each byte budget, with a 16 KiB burst. Check counters and measured throughput; policies clear on gateway reboot."}}),
-    )
+    let message = if input.up_kbps == 0 {
+        "Device speed cap removed and absence verified. Other limits were preserved."
+    } else {
+        "Both device rate policies installed and read back. Excess traffic is dropped above each byte budget, with a 16 KiB burst. Check counters and measured throughput; policies clear on gateway reboot."
+    };
+    Ok(json!({
+        "outcome": "rate_policy_verified",
+        "limits": after,
+        "message": message,
+    }))
 }
 
 #[cfg(test)]

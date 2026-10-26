@@ -96,17 +96,18 @@ button.primary {
   place-items: center;
   background: #2b575e;
   border: 1px solid #4a8285;
-  width: 35px;
-  height: 39px;
+  width: 36px;
+  height: 36px;
+  flex: none;
   border-radius: 10px;
   font-size: 27px;
+  line-height: 1;
   color: #8dd5cc;
 }
 .version {
   font-size: 11px;
   letter-spacing: 0;
-  align-self: start;
-  margin-top: 3px;
+  align-self: center;
   color: #9bb0bf;
 }
 .sidebar-label {
@@ -619,7 +620,8 @@ dialog label {
   margin: 20px 0 0;
 }
 dialog input,
-dialog select {
+dialog select,
+dialog textarea {
   display: block;
   width: 100%;
   background: #fff;
@@ -629,6 +631,14 @@ dialog select {
   font-size: 14px;
   margin-top: 8px;
   color: var(--ink);
+}
+dialog input[type="range"] {
+  padding: 0;
+  border: 0;
+  accent-color: var(--teal);
+}
+.spike-presets {
+  flex-wrap: wrap;
 }
 .icon-button {
   background: transparent;
@@ -804,7 +814,7 @@ dialog select {
   }
   .brand-mark {
     width: 30px;
-    height: 33px;
+    height: 30px;
     font-size: 23px;
   }
   .sidebar-label,

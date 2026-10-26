@@ -6,7 +6,9 @@ mod model;
 mod movistar_cli;
 mod proxy;
 mod reachability;
+mod relay;
 mod router;
+mod spike;
 mod traffic;
 
 use axum::{
@@ -45,6 +47,8 @@ struct App {
     access_policy: Mutex<Value>,
     speed_limits: Mutex<Value>,
     latencies: Mutex<Value>,
+    spikes: Mutex<Value>,
+    relay_job: Mutex<Option<relay::RelayJob>>,
     block_verification: Mutex<Value>,
     verification_cancel: watch::Sender<u64>,
     traffic_gate: Mutex<()>,
@@ -141,9 +145,20 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
     for profile in profiles {
         views.push(profile.view().await);
     }
-    Json(
-        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "speed_limits":app.speed_limits.lock().await.clone(), "latencies":app.latencies.lock().await.clone(), "block_verification":app.block_verification.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
-    )
+    Json(json!({
+        "platform": std::env::consts::OS,
+        "gateway": gateway,
+        "router_info": app.router_info.lock().await.clone(),
+        "access_policy": app.access_policy.lock().await.clone(),
+        "speed_limits": app.speed_limits.lock().await.clone(),
+        "latencies": app.latencies.lock().await.clone(),
+        "spikes": app.spikes.lock().await.clone(),
+        "relay": app.relay_job.lock().await.as_ref().map(relay::RelayJob::view),
+        "block_verification": app.block_verification.lock().await.clone(),
+        "devices": app.devices.lock().await.clone(),
+        "profiles": views,
+        "events": app.events.lock().await.clone(),
+    }))
 }
 
 async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) -> ApiResult {
@@ -174,6 +189,14 @@ async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) 
             } else {
                 None
             };
+            let spikes = if matches!(config.kind, model::RouterKind::Openwrt) {
+                spike::status(&config)
+                    .await
+                    .ok()
+                    .map(|spikes| json!({"spikes":spikes}))
+            } else {
+                None
+            };
             *app.config.lock().await = Some(config);
             *app.block_verification.lock().await = Value::Null;
             app.traffic_history.lock().await.reset();
@@ -181,6 +204,7 @@ async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) 
             *app.access_policy.lock().await = Value::Null;
             *app.speed_limits.lock().await = speed.unwrap_or(Value::Null);
             *app.latencies.lock().await = delays.unwrap_or(Value::Null);
+            *app.spikes.lock().await = spikes.unwrap_or(Value::Null);
             let policy_note = match access {
                 Ok(policy) => {
                     app.cache_policy(policy).await;
@@ -251,6 +275,7 @@ async fn disconnect(State(app): State<Arc<App>>) -> ApiResult {
     *app.access_policy.lock().await = Value::Null;
     *app.speed_limits.lock().await = Value::Null;
     *app.latencies.lock().await = Value::Null;
+    *app.spikes.lock().await = Value::Null;
     app.devices.lock().await.clear();
     app.event(
         "Gateway session disconnected. Existing gateway rules remain in place.".into(),
@@ -534,6 +559,133 @@ async fn set_latency(
     }
 }
 
+async fn spike_status(State(app): State<Arc<App>>) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    *app.spikes.lock().await = Value::Null;
+    let spikes = spike::status(&app.configured().await?).await?;
+    let value =
+        json!({"spikes":spikes,"message":"Temporary lag status refreshed from the gateway."});
+    *app.spikes.lock().await = value.clone();
+    Ok(Json(value))
+}
+async fn spike_result(app: &App, result: Result<Value>) -> ApiResult {
+    match result {
+        Ok(value) => {
+            *app.spikes.lock().await = json!({"spikes":value["spikes"]});
+            app.event(
+                value["message"]
+                    .as_str()
+                    .unwrap_or("Lag readback completed")
+                    .into(),
+                "rule_verified",
+            )
+            .await;
+            Ok(Json(value))
+        }
+        Err(error) => {
+            app.event(format!("Temporary lag: {error}"), "failed_or_unknown")
+                .await;
+            Err(error.into())
+        }
+    }
+}
+async fn start_spike(
+    State(app): State<Arc<App>>,
+    Json(input): Json<spike::SpikeInput>,
+) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    let mac = input.validate()?;
+    let config = app.configured().await?;
+    let device = app
+        .devices
+        .lock()
+        .await
+        .iter()
+        .find(|device| device.mac == mac)
+        .cloned()
+        .ok_or_else(|| ApiError("Refresh inventory and select an observed device".into()))?;
+    *app.spikes.lock().await = Value::Null;
+    spike_result(&app, spike::start(&config, &input, Some(&device.ip)).await).await
+}
+async fn stop_spike(State(app): State<Arc<App>>, Json(input): Json<spike::MacInput>) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    let config = app.configured().await?;
+    *app.spikes.lock().await = Value::Null;
+    spike_result(&app, spike::stop(&config, &input.mac).await).await
+}
+async fn release_spike(
+    State(app): State<Arc<App>>,
+    Json(input): Json<spike::InterfaceInput>,
+) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    let config = app.configured().await?;
+    *app.spikes.lock().await = Value::Null;
+    spike_result(&app, spike::release(&config, &input.interface).await).await
+}
+
+async fn prepare_relay(
+    State(app): State<Arc<App>>,
+    Json(input): Json<spike::SpikeInput>,
+) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    if app.relay_job.lock().await.as_ref().is_some_and(|job| {
+        matches!(
+            job.view()["state"].as_str(),
+            Some("waiting" | "running" | "restoring" | "status_unknown")
+        )
+    }) {
+        return Err(ApiError(
+            "A relay is already prepared or running. Stop it before preparing another.".into(),
+        ));
+    }
+    let mac = input.validate()?;
+    let config = app.configured().await?;
+    let device = app
+        .devices
+        .lock()
+        .await
+        .iter()
+        .find(|device| device.mac == mac)
+        .cloned()
+        .ok_or_else(|| ApiError("Refresh inventory and select an observed device".into()))?;
+    let job = relay::prepare(&config, &input, &device.ip).await?;
+    let value = job.view();
+    *app.relay_job.lock().await = Some(job);
+    app.event(
+        format!("Relay prepared for {mac}; waiting for administrator authentication"),
+        "unverified",
+    )
+    .await;
+    Ok(Json(
+        json!({"relay":value,"message":"Relay prepared. Run the displayed command in Terminal; administrator authentication is required."}),
+    ))
+}
+async fn stop_relay(State(app): State<Arc<App>>) -> ApiResult {
+    let job = app.relay_job.lock().await;
+    let job = job
+        .as_ref()
+        .ok_or_else(|| ApiError("There is no relay to stop".into()))?;
+    job.stop()?;
+    Ok(Json(
+        json!({"message":"Stop requested. The relay will send gateway restoration frames before finishing."}),
+    ))
+}
+
 fn associated(information: &Value, mac: &str) -> bool {
     information["stations"]
         .as_array()
@@ -579,9 +731,10 @@ async fn persistent_movistar_block(
     app.cache_policy(serde_json::to_value(&policy).map_err(|error| error.to_string())?)
         .await;
     if !blocked {
-        return Ok(
-            json!({"outcome":"unblock_verified","message":"This MAC was removed from the router blacklist and absence was verified in a fresh SSH session. Other entries and the filter mode were preserved. The device can reconnect when it is ready."}),
-        );
+        return Ok(json!({
+            "outcome": "unblock_verified",
+            "message": "This MAC was removed from the router blacklist and absence was verified in a fresh SSH session. Other entries and the filter mode were preserved. The device can reconnect when it is ready.",
+        }));
     }
     let diagnostics: Vec<String> = change.disconnect_diagnostic.into_iter().collect();
     let message = if let Some(detail) = diagnostics.first() {
@@ -663,7 +816,15 @@ async fn verify_block_later(
     } else {
         "The blacklist was initially verified, but the later policy and radio checks did not confirm disconnection. Inspect gateway rules before relying on the ban."
     };
-    *app.block_verification.lock().await = json!({"id":id,"mac":mac,"status":if verified {"verified"} else {"inconclusive"},"message":message,"radio_samples":verification.samples,"diagnostics":diagnostics});
+    *app.block_verification.lock().await = json!({
+        "id": id,
+        "mac": mac,
+        "kind": "block",
+        "status": if verified { "verified" } else { "inconclusive" },
+        "message": message,
+        "radio_samples": verification.samples,
+        "diagnostics": diagnostics,
+    });
     app.event(
         message.into(),
         if verified { "verified" } else { "unverified" },
@@ -671,9 +832,83 @@ async fn verify_block_later(
     .await;
 }
 
+fn kick_observation(
+    information: &Value,
+    mac: &str,
+    acknowledged: bool,
+) -> (&'static str, &'static str) {
+    if associated(information, mac) {
+        (
+            "associated",
+            "The device is still associated or reconnected. A temporary kick does not prevent reconnection.",
+        )
+    } else if information["radios_read"] != 2 {
+        (
+            "inconclusive",
+            "The router did not provide both Wi-Fi radio lists, so disconnection could not be verified.",
+        )
+    } else if acknowledged {
+        (
+            "observed_absent",
+            "The router acknowledged the kick and the device was absent at the check. It may reconnect.",
+        )
+    } else {
+        (
+            "observed_absent",
+            "The device was absent at the check, but the router did not confirm the kick; it may have already been offline or reconnect later.",
+        )
+    }
+}
+
+async fn verify_kick_later(
+    app: Arc<App>,
+    config: RouterConfig,
+    mac: String,
+    id: String,
+    acknowledged: bool,
+    mut cancel: watch::Receiver<u64>,
+) {
+    tokio::select! { _ = cancel.changed() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {} }
+    let _guard = app.gate.lock().await;
+    if cancel.has_changed().unwrap_or(true) || app.block_verification.lock().await["id"] != id {
+        return;
+    }
+    let traffic = tokio::select! { _ = cancel.changed() => return, value = tokio::time::timeout(std::time::Duration::from_secs(5), app.traffic_gate.lock()) => value };
+    let (status, message) = if let Ok(_traffic_guard) = traffic {
+        let result = tokio::select! { _ = cancel.changed() => return, value = tokio::time::timeout(std::time::Duration::from_secs(8), router::movistar_information(&config)) => value };
+        match result {
+            Ok(Ok(information)) => {
+                let outcome = kick_observation(&information, &mac, acknowledged);
+                *app.router_info.lock().await = information;
+                outcome
+            }
+            _ => (
+                "inconclusive",
+                "The Wi-Fi association check did not complete, so the kick could not be verified.",
+            ),
+        }
+    } else {
+        (
+            "inconclusive",
+            "The router was busy with a traffic read, so the kick could not be verified.",
+        )
+    };
+    *app.block_verification.lock().await =
+        json!({"id":id,"mac":mac,"kind":"kick","status":status,"message":message});
+    app.event(
+        format!("Temporary kick {mac}: {message}"),
+        if status == "observed_absent" {
+            "observed"
+        } else {
+            "unverified"
+        },
+    )
+    .await;
+}
+
 async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceAction>) -> ApiResult {
     let mac = model::mac_address(&input.mac)?;
-    if matches!(input.action.as_str(), "block" | "unblock") {
+    if matches!(input.action.as_str(), "block" | "unblock" | "kick") {
         app.verification_cancel
             .send_modify(|generation| *generation = generation.wrapping_add(1));
         *app.block_verification.lock().await = Value::Null;
@@ -691,6 +926,8 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
     }
     if matches!(input.action.as_str(), "block" | "unblock") {
         *app.access_policy.lock().await = Value::Null;
+    }
+    if matches!(input.action.as_str(), "block" | "unblock" | "kick") {
         *app.block_verification.lock().await = Value::Null;
     }
     let result = match input.action.as_str() {
@@ -702,35 +939,18 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
         "unblock" => router::block(&config, &mac, false).await,
         "kick" => {
             if matches!(config.kind, model::RouterKind::Movistar) {
-                let before = router::movistar_information(&config).await?;
-                if !before["stations"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|station| station["mac"] == mac)
-                {
-                    return Err(ApiError("The device is not confirmed associated in the available router radio data. Refresh router evidence before sending a disconnect.".into()));
-                }
-                let sent = movistar_cli::disconnect(&config, &mac).await?;
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let after = router::movistar_information(&config).await?;
-                let target_is_associated = after["stations"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|station| station["mac"] == mac);
-                let absent = after["radios_read"] == 2 && !target_is_associated;
-                *app.router_info.lock().await = after;
-                if absent {
-                    Ok(
-                        json!({"outcome":"disassociation_verified","message":"Device absent from both router Wi-Fi association lists after the disconnect request. It may reconnect."}),
-                    )
-                } else if sent["router_acknowledged"] == true {
-                    Ok(
-                        json!({"outcome":"router_deauth_reported","message":if target_is_associated {"Router reported this device was deauthenticated. It is associated at readback, so it may have reconnected. This was a one-off disconnect, not a persistent block."} else {"Router reported deauthentication, but a complete radio readback was unavailable. Its current connection state is unknown."}}),
-                    )
-                } else {
-                    Ok(sent)
+                match tokio::time::timeout(std::time::Duration::from_secs(12), movistar_cli::disconnect(&config, &mac)).await {
+                    Ok(Ok(sent)) => Ok(json!({
+                        "outcome": "kick_verification_pending",
+                        "router_acknowledged": sent["router_acknowledged"] == true,
+                        "message": "Temporary disconnect command sent. Checking Wi-Fi association in the background; the device may reconnect immediately.",
+                    })),
+                    Ok(Err(error)) => Err(error),
+                    Err(_) => Ok(json!({
+                        "outcome": "kick_verification_pending",
+                        "router_acknowledged": false,
+                        "message": "The router did not finish the disconnect request in time; its outcome is unknown. Checking Wi-Fi association in the background.",
+                    })),
                 }
             } else {
                 router::kick(&config, &mac).await
@@ -746,7 +966,7 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
                         ApiError("Verified blacklist could not be scheduled for follow-up".into())
                     })?;
                 let id = Uuid::new_v4().to_string();
-                *app.block_verification.lock().await = json!({"id":id,"mac":mac,"status":"checking","message":"Blacklist entry verified; checking Wi-Fi association."});
+                *app.block_verification.lock().await = json!({"id":id,"mac":mac,"kind":"block","status":"checking","message":"Blacklist entry verified; checking Wi-Fi association."});
                 let cancel = app.verification_cancel.subscribe();
                 tokio::spawn(verify_block_later(
                     app.clone(),
@@ -754,6 +974,20 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
                     mac.clone(),
                     id,
                     policy,
+                    cancel,
+                ));
+            }
+            if value["outcome"] == "kick_verification_pending" {
+                let id = Uuid::new_v4().to_string();
+                let acknowledged = value["router_acknowledged"] == true;
+                *app.block_verification.lock().await = json!({"id":id,"mac":mac,"kind":"kick","status":"checking","message":"Checking Wi-Fi association after the temporary kick."});
+                let cancel = app.verification_cancel.subscribe();
+                tokio::spawn(verify_kick_later(
+                    app.clone(),
+                    config.clone(),
+                    mac.clone(),
+                    id,
+                    acknowledged,
                     cancel,
                 ));
             }
@@ -776,6 +1010,7 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
                 } else if value["outcome"] == "command_sent"
                     || value["outcome"] == "block_policy_verified"
                     || value["outcome"] == "block_verification_pending"
+                    || value["outcome"] == "kick_verification_pending"
                 {
                     "unverified"
                 } else {
@@ -809,9 +1044,12 @@ async fn rules(State(app): State<Arc<App>>) -> ApiResult {
         app.cache_policy(policy.clone()).await;
         let information = router::movistar_information(&config).await?;
         *app.router_info.lock().await = information.clone();
-        return Ok(Json(
-            json!({"kind":"movistar","blacklist":policy,"router_info":information,"message":"Fresh router blacklist and Wi-Fi association readback. A listed MAC is blocked only while blacklist mode is enabled; incomplete radio reads cannot prove absence."}),
-        ));
+        return Ok(Json(json!({
+            "kind": "movistar",
+            "blacklist": policy,
+            "router_info": information,
+            "message": "Fresh router blacklist and Wi-Fi association readback. A listed MAC is blocked only while blacklist mode is enabled; incomplete radio reads cannot prove absence.",
+        })));
     }
     let result = router::rule_status(&config).await?;
     *app.access_policy.lock().await = Value::Null;
@@ -933,6 +1171,12 @@ fn routes(app: Arc<App>) -> Router {
         .route("/api/device/limit", post(set_limit))
         .route("/api/latencies", post(latency_status))
         .route("/api/device/latency", post(set_latency))
+        .route("/api/spikes", post(spike_status))
+        .route("/api/device/spike", post(start_spike))
+        .route("/api/device/spike/stop", post(stop_spike))
+        .route("/api/device/spike/release", post(release_spike))
+        .route("/api/device/relay", post(prepare_relay))
+        .route("/api/device/relay/stop", post(stop_relay))
         .route("/api/profiles", post(add_profile))
         .route(
             "/api/profiles/{id}",
@@ -994,6 +1238,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         access_policy: Mutex::new(Value::Null),
         speed_limits: Mutex::new(Value::Null),
         latencies: Mutex::new(Value::Null),
+        spikes: Mutex::new(Value::Null),
+        relay_job: Mutex::new(None),
         block_verification: Mutex::new(Value::Null),
         verification_cancel: watch::channel(0).0,
         traffic_gate: Mutex::new(()),
@@ -1048,6 +1294,24 @@ fn open_browser(url: &str) {
 mod verification_tests {
     use super::*;
 
+    #[test]
+    fn temporary_kick_observation_never_treats_partial_or_offline_as_proof() {
+        let mac = "02:00:00:00:00:01";
+        let partial = json!({"radios_read":1,"stations":[]});
+        let absent = json!({"radios_read":2,"stations":[]});
+        let connected = json!({"radios_read":2,"stations":[{"mac":mac}]});
+        assert_eq!(kick_observation(&partial, mac, false).0, "inconclusive");
+        assert_eq!(kick_observation(&connected, mac, true).0, "associated");
+        let (status, message) = kick_observation(&absent, mac, false);
+        assert_eq!(status, "observed_absent");
+        assert!(message.contains("already been offline"));
+        assert!(
+            kick_observation(&absent, mac, true)
+                .1
+                .contains("acknowledged")
+        );
+    }
+
     #[tokio::test]
     async fn a_new_action_cancels_waiting_follow_up_without_stale_results() {
         let app = Arc::new(App {
@@ -1063,6 +1327,8 @@ mod verification_tests {
             access_policy: Mutex::new(Value::Null),
             speed_limits: Mutex::new(Value::Null),
             latencies: Mutex::new(Value::Null),
+            spikes: Mutex::new(Value::Null),
+            relay_job: Mutex::new(None),
             block_verification: Mutex::new(json!({"id":"old", "status":"checking"})),
             verification_cancel: watch::channel(0).0,
             traffic_gate: Mutex::new(()),

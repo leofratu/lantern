@@ -11,11 +11,11 @@
   </head>
   <body>
     <aside class="sidebar">
-      <a class="brand" href="/" aria-label="Lantern home"
-        ><span class="brand-mark">⌘</span>lantern<span class="version"
-          >0.1</span
-        ></a
-      >
+      <a class="brand" href="/" aria-label="Lantern home">
+        <span class="brand-mark" aria-hidden="true">⌘</span>
+        <span>lantern</span>
+        <span class="version">0.1</span>
+      </a>
       <p class="sidebar-label">Workspace</p>
       <nav aria-label="Workspace">
         <button data-page="network" class="nav active">
@@ -466,6 +466,74 @@
       </div>
       <p id="limit-target"></p>
       <p id="limit-support"></p>
+      <form id="spike-form">
+        <h3>Temporary ping increase</h3>
+        <label for="spike-strength">Strength · added milliseconds</label>
+        <input
+          id="spike-strength"
+          type="range"
+          min="1"
+          max="2000"
+          step="1"
+          value="350"
+        />
+        <div class="form-row">
+          <label
+            >Added delay · ms<input
+              name="delay"
+              type="number"
+              min="1"
+              max="2000"
+              step="1"
+              value="350"
+              required
+          /></label>
+          <label
+            >Duration · seconds<input
+              name="duration"
+              type="number"
+              min="5"
+              max="600"
+              step="1"
+              value="60"
+              required
+          /></label>
+        </div>
+        <div class="dialog-actions spike-presets">
+          <button class="secondary" type="button" data-spike-preset="100">
+            100 ms
+          </button>
+          <button class="secondary" type="button" data-spike-preset="250">
+            250 ms
+          </button>
+          <button class="secondary" type="button" data-spike-preset="350">
+            350 ms
+          </button>
+          <button class="secondary" type="button" data-spike-preset="500">
+            500 ms
+          </button>
+          <button class="secondary" type="button" data-spike-preset="1000">
+            1,000 ms
+          </button>
+        </div>
+        <p id="spike-description">
+          Adds delay to traffic from the gateway to this device. The gateway
+          ends the effect automatically, even if Lantern closes. Requires
+          OpenWrt, disabled offloading, and an unused LAN root queue.
+        </p>
+        <div id="spike-results" aria-live="polite"></div>
+        <div class="dialog-actions">
+          <button class="secondary" id="refresh-spikes" type="button">
+            Refresh status
+          </button>
+          <button class="secondary" id="stop-spike" type="button">
+            Stop spike
+          </button>
+          <button class="primary" id="start-spike" type="submit">
+            Start spike
+          </button>
+        </div>
+      </form>
       <form id="limit-form">
         <h3>Speed cap</h3>
         <div class="form-row">
