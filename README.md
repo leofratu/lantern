@@ -126,7 +126,7 @@ Lantern performs these steps:
 2. Adds only the selected MAC with native `add mac_blocked`. An existing entry is reused.
 3. Enables blacklist mode only when explicitly confirmed. This router disables whitelist mode when enabling its blacklist. If a disabled blacklist contains unrelated addresses, Lantern refuses to activate it because those devices would also be blocked.
 4. After a change, reads the policy in a new SSH session and checks that unrelated entries were preserved. If it already matches, the initial fresh read is sufficient.
-5. Sends the native disconnect command to end an existing association.
+5. Sends the native disconnect command to end an existing association. If it does not return within eight seconds, Lantern reports the command as unconfirmed; the router may still process it.
 6. Returns control after the policy readback and disconnect command. In the background, it allows up to four bounded radio checks for the filter to settle, requires two consecutive complete observations of absence, then reads the blacklist again. A new block or unblock cancels the pending follow-up so it cannot delay or overwrite the new action.
 
 </details>

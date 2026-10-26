@@ -62,74 +62,116 @@ impl Drop for KnownHost {
     }
 }
 
-async fn cli(config: &RouterConfig, command: &str) -> Result<String> {
-    config.validate()?;
-    if !matches!(config.kind, RouterKind::Movistar) {
-        return Err("Native blacklist controls require a Movistar gateway".into());
+struct CliClient<'a> {
+    config: &'a RouterConfig,
+    known: KnownHost,
+    #[cfg(test)]
+    command_override: Option<PathBuf>,
+}
+
+impl<'a> CliClient<'a> {
+    async fn new(config: &'a RouterConfig) -> Result<Self> {
+        config.validate()?;
+        if !matches!(config.kind, RouterKind::Movistar) {
+            return Err("Native blacklist controls require a Movistar gateway".into());
+        }
+        let expected = config.ssh_fingerprint.as_deref().ok_or("Inspect and trust this router's SSH fingerprint in Gateway settings before using SSH controls")?;
+        let (fingerprint, key) = key(config).await?;
+        if fingerprint != expected {
+            return Err("SSH host key changed. Router controls were stopped; verify the gateway identity before trusting a replacement key.".into());
+        }
+        let known =
+            KnownHost(std::env::temp_dir().join(format!("lantern-host-{}", Uuid::new_v4())));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&known.0)
+            .and_then(|mut file| file.write_all(key.as_bytes()))
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            config,
+            known,
+            #[cfg(test)]
+            command_override: None,
+        })
     }
-    let expected=config.ssh_fingerprint.as_deref().ok_or("Inspect and trust this router's SSH fingerprint in Gateway settings before using SSH controls")?;
-    let (fingerprint, key) = key(config).await?;
-    if fingerprint != expected {
-        return Err("SSH host key changed. Router controls were stopped; verify the gateway identity before trusting a replacement key.".into());
+
+    fn command(&self) -> Result<Command> {
+        #[cfg(test)]
+        if let Some(path) = &self.command_override {
+            return Ok(Command::new(path));
+        }
+        let config = self.config;
+        let mut ssh = Command::new("ssh");
+        ssh.args([
+            "-tt",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "HostKeyAlgorithms=+ssh-rsa",
+            "-o",
+            "PubkeyAuthentication=no",
+            "-o",
+            "PreferredAuthentications=password",
+            "-o",
+            "NumberOfPasswordPrompts=1",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            &format!("UserKnownHostsFile={}", self.known.0.display()),
+            &format!("1234@{}", config.host),
+        ]);
+        ssh.env(
+            "SSH_ASKPASS",
+            std::env::current_exe().map_err(|error| error.to_string())?,
+        )
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", "lantern:0")
+        .env("LANTERN_ASKPASS", "1")
+        .env("LANTERN_SSH_PASSWORD", &config.password);
+        Ok(ssh)
     }
-    let known = KnownHost(std::env::temp_dir().join(format!("lantern-host-{}", Uuid::new_v4())));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+
+    async fn connect(&self) -> Result<CliSession> {
+        CliSession::start(self.command()?)
+            .await
+            .map_err(|e| self.redact(e))
     }
-    options
-        .open(&known.0)
-        .and_then(|mut file| file.write_all(key.as_bytes()))
-        .map_err(|error| error.to_string())?;
-    let mut ssh = Command::new("ssh");
-    ssh.args([
-        "-tt",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        "HostKeyAlgorithms=+ssh-rsa",
-        "-o",
-        "PubkeyAuthentication=no",
-        "-o",
-        "PreferredAuthentications=password",
-        "-o",
-        "NumberOfPasswordPrompts=1",
-        "-o",
-        "ConnectTimeout=5",
-        "-o",
-        "LogLevel=ERROR",
-        "-o",
-        &format!("UserKnownHostsFile={}", known.0.display()),
-        &format!("1234@{}", config.host),
-    ]);
-    ssh.env(
-        "SSH_ASKPASS",
-        std::env::current_exe().map_err(|error| error.to_string())?,
-    )
-    .env("SSH_ASKPASS_REQUIRE", "force")
-    .env("DISPLAY", "lantern:0")
-    .env("LANTERN_ASKPASS", "1")
-    .env("LANTERN_SSH_PASSWORD", &config.password);
-    let text = interactive(ssh, command).await.map_err(|message| {
-        if config.password.is_empty() {
+    fn redact(&self, message: String) -> String {
+        if self.config.password.is_empty() {
             message
         } else {
-            message.replace(&config.password, "[REDACTED]")
+            message.replace(&self.config.password, "[REDACTED]")
         }
-    })?;
-    if text.contains("Invalid")
-        || text.contains("Operation Blocked")
-        || text.contains("Invalid input")
-        || text.contains("Must input")
-        || text.contains("Must Input")
-        || text.contains("Error:")
-    {
-        return Err("The router rejected the management command; no successful enforcement has been verified".into());
     }
-    Ok(text)
+    async fn run(&self, session: &mut CliSession, command: &str) -> Result<String> {
+        let text = session.run(command).await.map_err(|e| self.redact(e))?;
+        if text.contains("Invalid")
+            || text.contains("Operation Blocked")
+            || text.contains("Invalid input")
+            || text.contains("Must input")
+            || text.contains("Must Input")
+            || text.contains("Error:")
+        {
+            return Err("The router rejected the management command; no successful enforcement has been verified".into());
+        }
+        Ok(text)
+    }
+}
+
+async fn cli(config: &RouterConfig, command: &str) -> Result<String> {
+    let client = CliClient::new(config).await?;
+    let mut session = client.connect().await?;
+    let result = client.run(&mut session, command).await;
+    session.close().await;
+    result
 }
 
 async fn prompt(reader: &mut tokio::process::ChildStdout) -> Result<String> {
@@ -153,53 +195,78 @@ async fn prompt(reader: &mut tokio::process::ChildStdout) -> Result<String> {
     }
 }
 
-async fn interactive(mut command: Command, request: &str) -> Result<String> {
-    command
-        .kill_on_drop(true)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Cannot launch SSH: {error}"))?;
-    let mut input = child.stdin.take().ok_or("SSH input unavailable")?;
-    let mut output = child.stdout.take().ok_or("SSH output unavailable")?;
-    // Native configuration writes can take over 20 seconds on this firmware.
-    let result = timeout(Duration::from_secs(60), async {
-        prompt(&mut output).await?;
-        input
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .map_err(|error| error.to_string())?;
-        let reply = prompt(&mut output).await?;
-        input
-            .write_all(b"exit\n")
-            .await
-            .map_err(|error| error.to_string())?;
-        drop(input);
-        // Some firmware leaves the SSH transport open after the final prompt.
-        // The command has already completed; do not wait a full minute for exit.
-        if timeout(Duration::from_secs(1), child.wait()).await.is_err() {
-            let _ = child.kill().await;
-        }
-        Ok::<String, String>(reply)
-    })
-    .await;
-    match result {
-        Ok(Ok(text)) => Ok(text),
-        Ok(Err(error)) => {
-            let _ = child.kill().await;
-            let mut diagnostics = String::new();
-            if let Some(stderr) = child.stderr.take() {
-                let _ = stderr.take(2048).read_to_string(&mut diagnostics).await;
-            }
-            Err(format!("{error}. {}", diagnostics.trim()))
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            Err("Router SSH session timed out. A command may have been sent; verify association or blacklist state before retrying.".into())
+struct CliSession {
+    child: tokio::process::Child,
+    input: tokio::process::ChildStdin,
+    output: tokio::process::ChildStdout,
+}
+impl CliSession {
+    async fn start(mut command: Command) -> Result<Self> {
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Cannot launch SSH: {error}"))?;
+        let input = child.stdin.take().ok_or("SSH input unavailable")?;
+        let output = child.stdout.take().ok_or("SSH output unavailable")?;
+        let mut session = Self {
+            child,
+            input,
+            output,
+        };
+        let result = timeout(Duration::from_secs(60), prompt(&mut session.output)).await;
+        match result {
+            Ok(Ok(_)) => Ok(session),
+            Ok(Err(error)) => Err(session.error(error).await),
+            Err(_) => Err(session
+                .error("Router SSH session timed out before its prompt".into())
+                .await),
         }
     }
+    async fn error(&mut self, error: String) -> String {
+        let _ = self.child.kill().await;
+        let mut diagnostics = String::new();
+        if let Some(stderr) = self.child.stderr.take() {
+            let _ = stderr.take(2048).read_to_string(&mut diagnostics).await;
+        }
+        format!("{error}. {}", diagnostics.trim())
+    }
+    async fn run(&mut self, request: &str) -> Result<String> {
+        // Native writes can take over 20 seconds on this firmware.
+        let result = timeout(Duration::from_secs(60), async {
+            self.input
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
+            prompt(&mut self.output).await
+        })
+        .await;
+        match result {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(error)) => Err(self.error(error).await),
+            Err(_) => Err(self.error("Router SSH session timed out. A command may have been sent; verify association or blacklist state before retrying".into()).await),
+        }
+    }
+    async fn close(mut self) {
+        let _ = self.input.write_all(b"exit\n").await;
+        if timeout(Duration::from_millis(200), self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.kill().await;
+        }
+    }
+}
+
+#[cfg(test)]
+async fn interactive(command: Command, request: &str) -> Result<String> {
+    let mut session = CliSession::start(command).await?;
+    let reply = session.run(request).await;
+    session.close().await;
+    reply
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -307,28 +374,75 @@ fn verify_change(before: &Blacklist, after: &Blacklist, mac: &str, blocked: bool
     Ok(())
 }
 
+pub struct BlockChange {
+    pub policy: Blacklist,
+    pub disconnect_diagnostic: Option<String>,
+}
+
 pub async fn set_block(
     config: &RouterConfig,
     mac: &str,
     blocked: bool,
     enable_mode: bool,
-) -> Result<Blacklist> {
+) -> Result<BlockChange> {
     let mac = mac_address(mac)?;
-    let before = blacklist(config).await?;
-    let commands = block_plan(&before, &mac, blocked, enable_mode)?;
-    if commands.is_empty() {
-        verify_change(&before, &before, &mac, blocked)?;
-        return Ok(before);
-    }
-    for command in commands {
-        cli(config, &command).await.map_err(|error| format!("Blacklist change may be partially applied: {error}. Inspect gateway rules before retrying."))?;
-    }
-    // A fresh authenticated session is authoritative; a setter acknowledgement is not.
-    let after = blacklist(config)
+    let client = CliClient::new(config).await?;
+    set_block_with_client(&client, &mac, blocked, enable_mode).await
+}
+
+async fn set_block_with_client(
+    client: &CliClient<'_>,
+    mac: &str,
+    blocked: bool,
+    enable_mode: bool,
+) -> Result<BlockChange> {
+    let mut session = client.connect().await?;
+    let before = parse_blacklist(&client.run(&mut session, "show blacklist").await?)?;
+    let commands = block_plan(&before, mac, blocked, enable_mode)?;
+    let after = if commands.is_empty() {
+        before.clone()
+    } else {
+        for command in commands {
+            client.run(&mut session, &command).await.map_err(|error| format!("Blacklist change may be partially applied: {error}. Inspect gateway rules before retrying."))?;
+        }
+        session.close().await;
+        // Reuse the pinned host key, but use a fresh authenticated session for readback.
+        session = client
+            .connect()
+            .await
+            .map_err(|error| format!("Blacklist write outcome is unknown: {error}"))?;
+        let response = client
+            .run(&mut session, "show blacklist")
+            .await
+            .map_err(|error| format!("Blacklist write outcome is unknown: {error}"))?;
+        parse_blacklist(&response)
+            .map_err(|error| format!("Blacklist write outcome is unknown: {error}"))?
+    };
+    verify_change(&before, &after, mac, blocked)?;
+    let disconnect_diagnostic = if blocked {
+        match timeout(
+            Duration::from_secs(8),
+            client.run(&mut session, &format!("set deauthenticate {mac}")),
+        )
         .await
-        .map_err(|error| format!("Blacklist write outcome is unknown: {error}"))?;
-    verify_change(&before, &after, &mac, blocked)?;
-    Ok(after)
+        {
+            Ok(Ok(reply)) if reported_deauthentication(&reply, mac) => None,
+            Ok(Ok(_)) => {
+                Some("The router did not explicitly acknowledge the disconnect command".into())
+            }
+            Ok(Err(error)) => Some(format!("Disconnect could not be confirmed: {error}")),
+            Err(_) => {
+                Some("The disconnect command timed out; the router may still process it".into())
+            }
+        }
+    } else {
+        None
+    };
+    session.close().await;
+    Ok(BlockChange {
+        policy: after,
+        disconnect_diagnostic,
+    })
 }
 
 pub async fn disconnect(config: &RouterConfig, mac: &str) -> Result<Value> {
@@ -356,6 +470,125 @@ fn reported_deauthentication(reply: &str, mac: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blacklist_transaction_reuses_sessions_and_checks_fresh_readback() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture =
+            Fixture(std::env::temp_dir().join(format!("lantern-cli-test-{}", Uuid::new_v4())));
+        fs::create_dir(&fixture.0).expect("fixture directory");
+        let script = fixture.0.join("fake-router");
+        fs::write(fixture.0.join("state"), "02:00:00:00:00:02\n").expect("initial policy");
+        fs::write(&script, r#"#!/bin/sh
+d=${0%/*}
+printf 'OPEN\n' >> "$d/events"
+printf '> '
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$d/events"
+  case "$line" in
+    'show blacklist') if [ -f "$d/bad-read" ] && [ "$(grep -c '^OPEN$' "$d/events")" -ge 2 ]; then printf 'show blacklist\ninvalid\n > '; else printf 'show blacklist\nmac_blacklist on\nblocked_mac_list\n'; cat "$d/state"; printf ' > '; fi ;;
+    'add mac_blocked 02:00:00:00:00:01') printf '%s\n' '02:00:00:00:00:01' >> "$d/state"; printf ' > ' ;;
+    'add mac_blocked 02:00:00:00:00:03') printf 'Error: refused\n > ' ;;
+    'remove mac_blocked 02:00:00:00:00:01') grep -Fvx '02:00:00:00:00:01' "$d/state" > "$d/new"; mv "$d/new" "$d/state"; printf ' > ' ;;
+    'set deauthenticate 02:00:00:00:00:01') if [ -f "$d/slow-disconnect" ]; then exec sleep 30; else printf 'deauthenticated MAC 02:00:00:00:00:01\n > '; fi ;;
+    'exit') exit 0 ;;
+    *) printf 'Error: unsupported\n > ' ;;
+  esac
+done
+"#).expect("fake router");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("executable");
+        let config = RouterConfig {
+            kind: RouterKind::Movistar,
+            host: "192.168.66.1".into(),
+            user: "1234".into(),
+            password: String::new(),
+            ssh_fingerprint: None,
+        };
+        let client = CliClient {
+            config: &config,
+            known: KnownHost(fixture.0.join("unused-known-host")),
+            command_override: Some(script),
+        };
+        let mac = "02:00:00:00:00:01";
+        let changed = set_block_with_client(&client, mac, true, false)
+            .await
+            .expect("block");
+        assert!(changed.policy.contains(mac));
+        assert!(changed.policy.contains("02:00:00:00:00:02"));
+        assert!(changed.disconnect_diagnostic.is_none());
+        let events = fs::read_to_string(fixture.0.join("events")).expect("events");
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            [
+                "OPEN",
+                "show blacklist",
+                "add mac_blocked 02:00:00:00:00:01",
+                "exit",
+                "OPEN",
+                "show blacklist",
+                "set deauthenticate 02:00:00:00:00:01",
+                "exit"
+            ]
+        );
+        fs::write(fixture.0.join("events"), "").expect("reset events");
+        set_block_with_client(&client, mac, false, false)
+            .await
+            .expect("unblock");
+        let events = fs::read_to_string(fixture.0.join("events")).expect("events");
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            [
+                "OPEN",
+                "show blacklist",
+                "remove mac_blocked 02:00:00:00:00:01",
+                "exit",
+                "OPEN",
+                "show blacklist",
+                "exit"
+            ]
+        );
+        assert!(
+            set_block_with_client(&client, "02:00:00:00:00:03", true, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("state")).expect("policy"),
+            "02:00:00:00:00:02\n"
+        );
+        fs::write(fixture.0.join("events"), "").expect("reset events");
+        fs::write(fixture.0.join("bad-read"), "").expect("altered readback");
+        assert!(
+            set_block_with_client(&client, mac, true, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            !fs::read_to_string(fixture.0.join("events"))
+                .expect("events")
+                .contains("set deauthenticate")
+        );
+        fs::remove_file(fixture.0.join("bad-read")).expect("restore readback");
+        fs::write(fixture.0.join("slow-disconnect"), "").expect("slow disconnect");
+        let start = std::time::Instant::now();
+        let result = set_block_with_client(&client, mac, true, false)
+            .await
+            .expect("confirmed policy survives slow disconnect");
+        assert!(result.policy.contains(mac));
+        assert!(
+            result
+                .disconnect_diagnostic
+                .expect("disconnect remains unconfirmed")
+                .contains("timed out")
+        );
+        assert!(start.elapsed() < Duration::from_secs(12));
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn completed_command_does_not_wait_for_a_stuck_ssh_exit() {

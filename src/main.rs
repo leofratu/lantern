@@ -574,7 +574,8 @@ async fn persistent_movistar_block(
 ) -> Result<Value> {
     // Invalidate cached policy before any write; a failed read must not display stale success.
     *app.access_policy.lock().await = Value::Null;
-    let policy = movistar_cli::set_block(config, mac, blocked, enable_mode).await?;
+    let change = movistar_cli::set_block(config, mac, blocked, enable_mode).await?;
+    let policy = change.policy;
     app.cache_policy(serde_json::to_value(&policy).map_err(|error| error.to_string())?)
         .await;
     if !blocked {
@@ -582,14 +583,14 @@ async fn persistent_movistar_block(
             json!({"outcome":"unblock_verified","message":"This MAC was removed from the router blacklist and absence was verified in a fresh SSH session. Other entries and the filter mode were preserved. The device can reconnect when it is ready."}),
         );
     }
-    let mut diagnostics = Vec::new();
-    if let Err(error) = movistar_cli::disconnect(config, mac).await {
-        diagnostics.push(format!(
-            "Policy is installed, but disconnect could not be confirmed: {error}"
-        ));
-    }
+    let diagnostics: Vec<String> = change.disconnect_diagnostic.into_iter().collect();
+    let message = if let Some(detail) = diagnostics.first() {
+        format!("Blacklist entry verified. {detail}. Checking Wi-Fi association in the background.")
+    } else {
+        "Blacklist entry verified. Checking Wi-Fi association in the background; the device may still be connected until those checks finish.".into()
+    };
     Ok(
-        json!({"outcome":"block_verification_pending", "message":if diagnostics.is_empty() {"Blacklist entry verified. Checking Wi-Fi association in the background; the device may still be connected until those checks finish."} else {"Blacklist entry verified, but the disconnect command was not confirmed. Checking Wi-Fi association in the background."}, "policy":policy, "diagnostics":diagnostics}),
+        json!({"outcome":"block_verification_pending", "message":message, "policy":policy, "diagnostics":diagnostics}),
     )
 }
 
