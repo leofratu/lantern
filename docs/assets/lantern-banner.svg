@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title description">
+  <title id="title">Lantern — see your network, control its access</title>
+  <desc id="description">A dark teal banner with a gateway connected to device identification, access control, and app bandwidth controls.</desc>
+  <defs>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#c3e5de" stroke-opacity=".055"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="420" rx="20" fill="#162b35"/>
+  <rect width="1200" height="420" rx="20" fill="url(#grid)"/>
+  <rect x="56" y="56" width="38" height="38" rx="8" fill="#274b53" stroke="#6caaa9"/>
+  <path d="M66 65h18v20H66zM72 60v30M61 72h28M61 79h28" fill="none" stroke="#a5e3d4" stroke-width="2" stroke-linecap="round"/>
+  <text x="109" y="85" fill="#f3f8f7" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="36" font-weight="650" letter-spacing="-1">lantern</text>
+  <text x="56" y="166" fill="#f3f8f7" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="49" font-weight="650" letter-spacing="-1.5">See your network.</text>
+  <text x="56" y="226" fill="#9adbc9" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="49" font-weight="650" letter-spacing="-1.5">Control its access.</text>
+  <text x="59" y="271" fill="#b6cbd0" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="19">Device identification. Router policies. App bandwidth.</text>
+  <g font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="13" font-weight="600" letter-spacing="1">
+    <rect x="57" y="321" width="132" height="32" rx="6" fill="#24444c" stroke="#44686c"/>
+    <text x="77" y="342" fill="#cce8e1">RUNS LOCALLY</text>
+    <rect x="200" y="321" width="157" height="32" rx="6" fill="#24444c" stroke="#44686c"/>
+    <text x="219" y="342" fill="#cce8e1">RUST + TYPESCRIPT</text>
+    <rect x="368" y="321" width="101" height="32" rx="6" fill="#24444c" stroke="#44686c"/>
+    <text x="388" y="342" fill="#cce8e1">GPL-3.0+</text>
+  </g>
+  <g fill="none" stroke="#568b8b" stroke-width="2">
+    <path d="M784 210h60M844 112v196M844 112h49M844 210h49M844 308h49"/>
+    <circle cx="844" cy="210" r="4" fill="#9adbc9" stroke="none"/>
+  </g>
+  <rect x="647" y="158" width="137" height="104" rx="13" fill="#25444e" stroke="#6caaa9"/>
+  <path d="M697 187h37v19h-37zM704 180v7M727 180v7" stroke="#9adbc9" fill="none" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="705" cy="197" r="2" fill="#9adbc9"/>
+  <circle cx="712" cy="197" r="2" fill="#9adbc9"/>
+  <text x="681" y="237" fill="#e4efed" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="16" font-weight="600">Gateway</text>
+  <g font-family="system-ui,-apple-system,Segoe UI,sans-serif">
+    <rect x="893" y="77" width="249" height="70" rx="10" fill="#203b45" stroke="#42656c"/>
+    <rect x="914" y="97" width="27" height="19" rx="3" fill="none" stroke="#9adbc9" stroke-width="2"/>
+    <path d="M927 116v7M919 123h17" stroke="#9adbc9" stroke-width="2"/>
+    <text x="959" y="108" fill="#e4efed" font-size="15" font-weight="600">Identify devices</text>
+    <text x="959" y="128" fill="#a4bec4" font-size="12">Names, models, evidence</text>
+    <rect x="893" y="175" width="249" height="70" rx="10" fill="#203b45" stroke="#42656c"/>
+    <path d="M917 194h23v18c0 7-11.5 13-11.5 13S917 219 917 212zM923 207l4 4 7-8" fill="none" stroke="#9adbc9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="959" y="206" fill="#e4efed" font-size="15" font-weight="600">Manage access</text>
+    <text x="959" y="226" fill="#a4bec4" font-size="12">Block, verify, unblock</text>
+    <rect x="893" y="273" width="249" height="70" rx="10" fill="#203b45" stroke="#42656c"/>
+    <path d="M916 320v-13M928 320v-25M940 320v-19" stroke="#9adbc9" stroke-width="4" stroke-linecap="round"/>
+    <text x="959" y="304" fill="#e4efed" font-size="15" font-weight="600">Set app limits</text>
+    <text x="959" y="324" fill="#a4bec4" font-size="12">Shared TCP proxy budgets</text>
+  </g>
+</svg>

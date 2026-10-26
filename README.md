@@ -1,10 +1,80 @@
-# Lantern
+<p align="center">
+  <img src="docs/assets/lantern-banner.svg" alt="Lantern — see your network, control its access. Local network administration built with Rust and TypeScript." width="1200">
+</p>
 
-Lantern is a free, open-source network administration app with a Rust backend and a TypeScript interface. It identifies devices, manages access through supported routers, and limits TCP bandwidth for applications using its local SOCKS5 proxies.
+<h1 align="center">Your network, in one local workspace.</h1>
 
-It runs as one executable on your computer and opens in your browser. There is no account, cloud backend, telemetry, or Electron runtime. Router credentials stay in memory. Router access policies can remain in effect after the app closes.
+<p align="center">
+  Identify devices. Manage router access. Set app bandwidth limits.<br>
+  Free software that runs on your computer, in your existing browser.
+</p>
 
-## Capabilities
+<p align="center">
+  <a href="#quick-start"><strong>Get started</strong></a> &nbsp;·&nbsp;
+  <a href="#router-setup">Router setup</a> &nbsp;·&nbsp;
+  <a href="#development">Development</a> &nbsp;·&nbsp;
+  <a href="VALIDATION.md">Validation</a> &nbsp;·&nbsp;
+  <a href="LICENSE">GPL-3.0-or-later</a>
+</p>
+
+---
+
+## At a glance
+
+| Identify | Control | Shape |
+| :--- | :--- | :--- |
+| **Know what's connected.**<br>Offline manufacturer lookup, discovered names, advertised models, and evidence for conflicting labels. | **Make access decisions visible.**<br>Supported router blocks, policy readback, Wi-Fi association checks, and explicit unblock controls. | **Give apps a bandwidth budget.**<br>Local SOCKS5 profiles with shared upload/download limits and live TCP transfer counters. |
+
+One Rust executable, a TypeScript interface, and local connections to your gateway. No account, cloud backend, telemetry, or Electron runtime.
+
+> [!NOTE]
+> **Credentials stay in memory. Router policies can outlive the app.** Closing Lantern does not remove an installed router block.
+
+## Quick start
+
+```sh
+git clone https://github.com/leofratu/lantern.git
+cd lantern
+cargo run --release --locked
+```
+
+Lantern opens its local address in your browser. It binds to `127.0.0.1`, makes no router changes at startup, and needs no administrator privileges on your computer.
+
+| Required | When |
+| :--- | :--- |
+| **Rust 1.91+** and your platform's C/C++ linker | Building the executable |
+| **An existing browser** | Using the interface |
+| **OpenSSH Client**: `ssh` and `ssh-keyscan` | Managing routers over SSH |
+| **Node.js 22+** | Editing or rebuilding the interface only |
+
+<details>
+<summary><strong>Launch options and platform notes</strong></summary>
+
+Generated JavaScript is included, so an ordinary Rust build does not need Node. On Windows, install the optional **OpenSSH Client** feature if its commands are missing.
+
+```sh
+# Choose a fixed local port and open the browser yourself.
+cargo run --release --locked -- --port 4177 --no-open
+```
+
+The compiled binary is `target/release/lantern` on macOS/Linux or `target/release/lantern.exe` on Windows. Stop it with Ctrl+C. The included `Lantern.command` launcher uses an existing Apple Silicon release build when available and otherwise starts Cargo.
+
+</details>
+
+## Compatibility
+
+| Environment | Status |
+| :--- | :--- |
+| **macOS · Apple Silicon** | Native optimized build and API checks passed |
+| **Linux · x86-64** | Build, API, and isolated nftables checks passed |
+| **Windows** | Source support; native validation pending |
+| **Movistar Askey RTF8115VW REV5** | Live adapter checks on firmware `ES_g14.17_RTF_TEF001_V9.17_V034` |
+| **OpenWrt** | Isolated firewall checks passed; physical radio validation pending |
+
+Other router models and firmware need validation. See [what was actually tested](VALIDATION.md).
+
+<details>
+<summary><strong>Compare capabilities by gateway</strong></summary>
 
 | Capability | Movistar Askey RTF8115VW | OpenWrt | Without a managed gateway |
 | --- | --- | --- | --- |
@@ -17,33 +87,13 @@ It runs as one executable on your computer and opens in your browser. There is n
 | Disconnect once | Native command and radio readback | hostapd disconnect, requested 60-second ban | Not available |
 | App bandwidth limits | Local SOCKS5 TCP proxy profiles | Same | Same |
 
-The Movistar adapter has been exercised on an RTF8115VW REV5 running `ES_g14.17_RTF_TEF001_V9.17_V034`. Other models and firmware require validation. macOS Apple Silicon and Linux x86-64 builds have been checked; native Windows validation is pending. Cross-platform source support does not mean every platform and router has been tested. See [validation notes](VALIDATION.md).
+</details>
 
-## Build and start
+---
 
-Requirements:
+## Router setup
 
-- Rust 1.91 or later and the platform's C/C++ linker toolchain.
-- An existing web browser.
-- OpenSSH client tools (`ssh` and `ssh-keyscan`) for router controls. On Windows, install the optional **OpenSSH Client** feature if these commands are missing.
-- Node.js 22 or later only when editing or rebuilding the interface. Generated JavaScript is included; an ordinary Rust build does not need Node.
-
-```sh
-git clone https://github.com/leofratu/lantern.git
-cd lantern
-cargo run --release --locked
-```
-
-Lantern listens on `127.0.0.1` at an available port and opens its address. It makes no router changes at startup and needs no administrator privileges on the computer running it.
-
-```sh
-# Choose a fixed local port and open the browser yourself.
-cargo run --release --locked -- --port 4177 --no-open
-```
-
-The compiled binary is `target/release/lantern` on macOS/Linux or `target/release/lantern.exe` on Windows. Stop it with Ctrl+C. The included `Lantern.command` launcher uses an existing Apple Silicon release build when available and otherwise starts Cargo.
-
-## Movistar setup
+### Movistar Askey
 
 1. Open **Gateway settings**, select **Movistar**, and enter the private IPv4 address and router administration password. This password may differ from the Wi-Fi password.
 2. Inspect the SSH fingerprint. Verify it against the gateway you administer before selecting the trust checkbox. Lantern pins that identity on every connection and stops if it changes.
@@ -52,9 +102,23 @@ The compiled binary is `target/release/lantern` on macOS/Linux or `target/releas
 
 The adapter uses the existing `1234` administration account. Native management writes can take tens of seconds; controls remain busy during the operation. Do not run another policy editor simultaneously.
 
-### Block until unblocked
+#### Block until unblocked
 
-Select **Details → Block until unblocked**, review the MAC, and confirm. Lantern performs these steps:
+Select **Details → Block until unblocked**, review the MAC, and confirm.
+
+```mermaid
+flowchart LR
+    A[Read policy] --> B[Add selected MAC]
+    B --> C[Read policy back]
+    C --> D[Disconnect Wi-Fi]
+    D --> E[Check both radios]
+    E --> F[Report verified or partial]
+```
+
+<details>
+<summary><strong>What happens when you confirm a block</strong></summary>
+
+Lantern performs these steps:
 
 1. Reads the current blacklist through authenticated SSH.
 2. Adds only the selected MAC with native `add mac_blocked`. An existing entry is reused.
@@ -63,9 +127,14 @@ Select **Details → Block until unblocked**, review the MAC, and confirm. Lante
 5. Sends the native disconnect command to end an existing association.
 6. Allows up to four radio checks for the filter to settle, requires two consecutive complete observations of absence, then reads the blacklist again.
 
-The router holds the policy without a timer or a Lantern keepalive process. Closing Lantern does not remove it. Live checks read the policy through fresh SSH sessions rather than relying on Lantern's memory. Router power-cycle durability has **not** been tested; an ISP configuration replacement, factory reset, firmware behavior, or another administrator can change the policy.
+</details>
 
-### Verification results
+The router holds the policy without a timer or a Lantern keepalive process. Closing Lantern does not remove it. Live checks read the policy through fresh SSH sessions rather than relying on Lantern's memory.
+
+> [!IMPORTANT]
+> Router power-cycle durability has **not** been tested. An ISP configuration replacement, factory reset, firmware behavior, or another administrator can change the policy.
+
+#### Read the result
 
 | Result | Evidence | Meaning |
 | --- | --- | --- |
@@ -76,9 +145,12 @@ The router holds the policy without a timer or a Lantern keepalive process. Clos
 
 **Inspect gateway rules → Verify again** retrieves current policy and association evidence. That radio result is a fresh single observation, not continuous monitoring. A radio list counts as complete only when its API explicitly reports success.
 
-### Unblock and recovery
+#### Unblock a device
 
 Use **Details → Unblock**, or select **Unblock** beside the MAC in **Inspect gateway rules**. The second route works even when the device has disappeared from inventory. Lantern uses `remove mac_blocked`, verifies absence in a new session, and preserves other entries and the global mode. Removing the final entry leaves blacklist mode enabled with an empty list.
+
+<details>
+<summary><strong>Recovery from the router's SSH interface</strong></summary>
 
 If Lantern is unavailable, connect using your SSH client, the existing administration account, and a verified host key. Replace this synthetic MAC with the intended device:
 
@@ -90,15 +162,20 @@ show blacklist
 
 Some firmware requires connection-specific legacy RSA host-key compatibility. Keep that setting scoped to this router. Never disable host-key verification to work around an identity mismatch.
 
-### Scope
+</details>
+
+#### Scope of a MAC block
 
 A MAC block applies to that address on the managed router. It cannot follow a device that changes its private MAC, uses another interface or gateway, or spoofs an address. Verification concerns this router's Wi-Fi radios; wired enforcement and every forwarding/offload path have not been independently measured. A silent device or an old DHCP lease alone does not prove blocking.
 
 **Disconnect once** is a separate action. Its acknowledgement does not install a blacklist entry, and the device can reconnect immediately.
 
-## OpenWrt setup
+### OpenWrt
 
 Configure key-based SSH access outside Lantern and verify the host key with your normal client. Select **OpenWrt** in Gateway settings, enter the private IPv4 address and username, and connect. The account needs access to leases, neighbors, nftables, and hostapd as applicable.
+
+<details>
+<summary><strong>Firewall behavior, rule lifetime, and recovery</strong></summary>
 
 Blocks use a dedicated `inet lantern_v1` nftables table with ownership marker `Managed by Lantern v1`. An early forward hook at priority `-10` drops packets matching the selected Ethernet source MAC and records packet/byte counters. Lantern refuses an existing table without its marker and does not flush other tables. JSON output support is required in the gateway's `nft` build.
 
@@ -107,6 +184,10 @@ Rules affect forwarded IPv4/IPv6 packets seen by the gateway. They do not remove
 These rules clear on gateway reboot. Closing Lantern does not remove them. Reconnect and inspect rules to remove a block, including for an absent device. An administrator can also inspect and delete the dedicated `inet lantern_v1` table to remove all Lantern forwarding rules.
 
 Wi-Fi disconnect uses authenticated `ubus hostapd.* del_client` calls, requests a 60-second reconnect ban, and reads the affected radios afterward. Physical OpenWrt radio interruption still needs hardware validation; firewall behavior has been tested against a real isolated Linux nftables namespace.
+
+</details>
+
+---
 
 ## Device identification
 
@@ -136,7 +217,10 @@ This is explicit proxy routing. It does not automatically intercept processes, s
 
 Loopback proxy ports do not authenticate local users. Other processes can use a known port; profiles are not a security boundary between local accounts.
 
-## Architecture and development
+## Development
+
+<details>
+<summary><strong>Source map and runtime design</strong></summary>
 
 ```text
 src/main.rs          Loopback API, authorization, operation serialization
@@ -152,6 +236,10 @@ data/                Embedded IEEE registry and attribution
 ```
 
 The backend uses Tokio with two worker threads and bounded waits. It allows at most 16 profiles and 128 proxy connections, with fixed 16 KiB directional buffers. Pacing budgets are shared per profile. These are implementation limits, not benchmark results.
+
+</details>
+
+### Build and check
 
 After editing the interface, rebuild it and then Rust: the executable embeds the frontend.
 
@@ -169,6 +257,9 @@ python3 tests/api_smoke.py target/debug/lantern
 
 Use `target/debug/lantern.exe` in the last command on Windows. Python 3 is required for integration scripts. The API smoke suite does not contact a router.
 
+<details>
+<summary><strong>Linux firewall integration</strong></summary>
+
 On Linux, run the firewall integration in its own user/network namespace:
 
 ```sh
@@ -177,7 +268,19 @@ python3 tests/gateway_namespace.py target/debug/lantern
 
 It requires `unshare`, `ip`, `nft`, and unprivileged user namespaces. It refuses the host network namespace and substitutes only SSH transport; firewall responses come from the isolated kernel. Never substitute a production router for this environment.
 
+</details>
+
 ## Security and operation
+
+| Boundary | Behavior |
+| :--- | :--- |
+| **Local interface** | Loopback binding, session API token, exact Host/Origin checks |
+| **Router identity** | Pinned SSH host key; stop on identity changes |
+| **Session data** | Credentials, inventory, profiles, and activity kept in memory |
+| **Router policy** | Separate from the app session; inspect before retrying an uncertain write |
+
+<details>
+<summary><strong>Transport, local data, and concurrent administration</strong></summary>
 
 The HTTP service binds only to IPv4 loopback. API requests require a random session token and exact Host/Origin checks. The UI uses a restrictive Content Security Policy, escaped device text, no CDN assets, and capped request bodies. Router responses and subprocess output are bounded.
 
@@ -187,8 +290,16 @@ Inventory, credentials, profile settings, and the latest 100 activity events are
 
 Writes are serialized inside one Lantern process and guarded in the UI. Multiple instances and other router editors do not share that lock. Transport failure after a write leaves the result unknown; inspect the router before retrying. Repeating a block or unblock is idempotent when the policy is unchanged.
 
+</details>
+
+### Current limits
+
 Native installers, automatic updates, native process interception, router-level speed shaping, UDP shaping, continuous monitoring, and universal firmware discovery are not implemented.
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE) and [third-party attribution](THIRD_PARTY.md). No proprietary NetCut or HelmoCut code, credentials, label photographs, or live client inventory fixtures are included.
+
+<p align="center">
+  <a href="#your-network-in-one-local-workspace">Back to top ↑</a>
+</p>
