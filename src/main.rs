@@ -28,7 +28,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, Semaphore},
+    sync::{Mutex, Semaphore, watch},
 };
 use uuid::Uuid;
 
@@ -45,6 +45,8 @@ struct App {
     access_policy: Mutex<Value>,
     speed_limits: Mutex<Value>,
     latencies: Mutex<Value>,
+    block_verification: Mutex<Value>,
+    verification_cancel: watch::Sender<u64>,
     traffic_gate: Mutex<()>,
     traffic_history: Mutex<traffic::History>,
 }
@@ -140,7 +142,7 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
         views.push(profile.view().await);
     }
     Json(
-        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "speed_limits":app.speed_limits.lock().await.clone(), "latencies":app.latencies.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
+        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "speed_limits":app.speed_limits.lock().await.clone(), "latencies":app.latencies.lock().await.clone(), "block_verification":app.block_verification.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
     )
 }
 
@@ -173,6 +175,7 @@ async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) 
                 None
             };
             *app.config.lock().await = Some(config);
+            *app.block_verification.lock().await = Value::Null;
             app.traffic_history.lock().await.reset();
             *app.router_info.lock().await = Value::Null;
             *app.access_policy.lock().await = Value::Null;
@@ -242,6 +245,7 @@ async fn disconnect(State(app): State<Arc<App>>) -> ApiResult {
         .try_lock()
         .map_err(|_| ApiError("Another operation is in progress".into()))?;
     *app.config.lock().await = None;
+    *app.block_verification.lock().await = Value::Null;
     app.traffic_history.lock().await.reset();
     *app.router_info.lock().await = Value::Null;
     *app.access_policy.lock().await = Value::Null;
@@ -584,49 +588,101 @@ async fn persistent_movistar_block(
             "Policy is installed, but disconnect could not be confirmed: {error}"
         ));
     }
+    Ok(
+        json!({"outcome":"block_verification_pending", "message":if diagnostics.is_empty() {"Blacklist entry verified. Checking Wi-Fi association in the background; the device may still be connected until those checks finish."} else {"Blacklist entry verified, but the disconnect command was not confirmed. Checking Wi-Fi association in the background."}, "policy":policy, "diagnostics":diagnostics}),
+    )
+}
+
+// Verification is read-only and each radio read is bounded. A new block,
+// unblock, or gateway connection invalidates the job before it can publish.
+async fn verify_block_later(
+    app: Arc<App>,
+    config: RouterConfig,
+    mac: String,
+    id: String,
+    expected: movistar_cli::Blacklist,
+    mut cancel: watch::Receiver<u64>,
+) {
     let mut verification = AssociationVerification::default();
-    // Firmware applies filter changes asynchronously. Allow settling, but require
-    // consecutive complete observations and never turn a failed radio into absence.
+    let mut diagnostics = Vec::new();
     for _ in 0..4 {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        match router::movistar_information(config).await {
-            Ok(information) => {
-                verification.observe(&information, mac);
+        tokio::select! { _ = cancel.changed() => return, _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {} }
+        let _guard = app.gate.lock().await;
+        if cancel.has_changed().unwrap_or(true) || app.block_verification.lock().await["id"] != id {
+            return;
+        }
+        let result = tokio::select! { _ = cancel.changed() => return, result = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            router::movistar_information(&config),
+        ) => result };
+        match result {
+            Ok(Ok(information)) => {
+                verification.observe(&information, &mac);
                 *app.router_info.lock().await = information;
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 verification.consecutive_absent = 0;
                 diagnostics.push(format!("Association verification failed: {error}"));
+            }
+            Err(_) => {
+                verification.consecutive_absent = 0;
+                diagnostics.push("Radio verification timed out".into());
             }
         }
         if verification.verified() {
             break;
         }
     }
-    let final_policy = movistar_cli::blacklist(config).await?;
-    app.cache_policy(serde_json::to_value(&final_policy).map_err(|error| error.to_string())?)
-        .await;
-    if !final_policy.enabled
-        || !final_policy.contains(mac)
-        || final_policy.blocked_macs != policy.blocked_macs
-    {
-        return Err("The blacklist policy changed during verification. The device is not confirmed blocked; inspect gateway rules.".into());
+    let _guard = app.gate.lock().await;
+    if cancel.has_changed().unwrap_or(true) || app.block_verification.lock().await["id"] != id {
+        return;
     }
-    let verified = verification.verified();
-    Ok(json!({
-        "outcome": if verified {"persistent_block_verified"} else {"block_policy_verified"},
-        "message": if verified {"Router blacklist enabled and this MAC read back in fresh SSH sessions. The device was absent from both Wi-Fi radios in two successive checks. The router holds this policy after Lantern closes; use Unblock to remove it."} else {"The router blacklist contains this MAC and is enabled, but two complete radio checks did not both confirm absence. The policy remains installed; inspect gateway rules to verify again or unblock."},
-        "verification":{"policy_verified":true,"absent_samples":verification.consecutive_absent,"required_samples":2,"radio_samples":verification.samples,"diagnostics":diagnostics}
-    }))
+    let policy = tokio::select! { _ = cancel.changed() => return, result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        movistar_cli::blacklist(&config),
+    ) => result };
+    let matches = match policy {
+        Ok(Ok(policy)) => {
+            let matches = policy.enabled
+                && policy.contains(&mac)
+                && policy.blocked_macs == expected.blocked_macs;
+            if let Ok(value) = serde_json::to_value(policy) {
+                app.cache_policy(value).await;
+            }
+            matches
+        }
+        _ => {
+            diagnostics.push("Could not re-check the blacklist after the radio checks".into());
+            false
+        }
+    };
+    let verified = matches && verification.verified();
+    let message = if verified {
+        "Ban verified: the blacklist entry remains enabled and the device was absent from both Wi-Fi radios twice."
+    } else {
+        "The blacklist was initially verified, but the later policy and radio checks did not confirm disconnection. Inspect gateway rules before relying on the ban."
+    };
+    *app.block_verification.lock().await = json!({"id":id,"mac":mac,"status":if verified {"verified"} else {"inconclusive"},"message":message,"radio_samples":verification.samples,"diagnostics":diagnostics});
+    app.event(
+        message.into(),
+        if verified { "verified" } else { "unverified" },
+    )
+    .await;
 }
 
 async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceAction>) -> ApiResult {
-    let _guard = app
-        .gate
-        .try_lock()
-        .map_err(|_| ApiError("Another operation is in progress".into()))?;
-    let config = app.configured().await?;
     let mac = model::mac_address(&input.mac)?;
+    if matches!(input.action.as_str(), "block" | "unblock") {
+        app.verification_cancel
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        *app.block_verification.lock().await = Value::Null;
+    }
+    let _guard = tokio::time::timeout(std::time::Duration::from_secs(2), app.gate.lock())
+        .await
+        .map_err(|_| {
+            ApiError("Another router operation is still in progress; try again shortly".into())
+        })?;
+    let config = app.configured().await?;
     if input.action != "unblock" && !app.devices.lock().await.iter().any(|d| d.mac == mac) {
         return Err(ApiError(
             "Refresh inventory and select an observed device".into(),
@@ -634,6 +690,7 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
     }
     if matches!(input.action.as_str(), "block" | "unblock") {
         *app.access_policy.lock().await = Value::Null;
+        *app.block_verification.lock().await = Value::Null;
     }
     let result = match input.action.as_str() {
         "block" | "unblock" if matches!(config.kind, model::RouterKind::Movistar) => {
@@ -682,6 +739,23 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
     };
     match result {
         Ok(value) => {
+            if value["outcome"] == "block_verification_pending" {
+                let policy: movistar_cli::Blacklist =
+                    serde_json::from_value(value["policy"].clone()).map_err(|_| {
+                        ApiError("Verified blacklist could not be scheduled for follow-up".into())
+                    })?;
+                let id = Uuid::new_v4().to_string();
+                *app.block_verification.lock().await = json!({"id":id,"mac":mac,"status":"checking","message":"Blacklist entry verified; checking Wi-Fi association."});
+                let cancel = app.verification_cancel.subscribe();
+                tokio::spawn(verify_block_later(
+                    app.clone(),
+                    config.clone(),
+                    mac.clone(),
+                    id,
+                    policy,
+                    cancel,
+                ));
+            }
             if matches!(config.kind, model::RouterKind::Openwrt)
                 && matches!(input.action.as_str(), "block" | "unblock")
             {
@@ -700,6 +774,7 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
                     "router_reported"
                 } else if value["outcome"] == "command_sent"
                     || value["outcome"] == "block_policy_verified"
+                    || value["outcome"] == "block_verification_pending"
                 {
                     "unverified"
                 } else {
@@ -918,6 +993,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         access_policy: Mutex::new(Value::Null),
         speed_limits: Mutex::new(Value::Null),
         latencies: Mutex::new(Value::Null),
+        block_verification: Mutex::new(Value::Null),
+        verification_cancel: watch::channel(0).0,
         traffic_gate: Mutex::new(()),
         traffic_history: Mutex::new(traffic::History::default()),
     });
@@ -969,6 +1046,57 @@ fn open_browser(url: &str) {
 #[cfg(test)]
 mod verification_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_new_action_cancels_waiting_follow_up_without_stale_results() {
+        let app = Arc::new(App {
+            token: String::new(),
+            authority: String::new(),
+            config: Mutex::new(None),
+            devices: Mutex::new(Vec::new()),
+            profiles: Mutex::new(BTreeMap::new()),
+            events: Mutex::new(VecDeque::new()),
+            gate: Mutex::new(()),
+            capacity: Arc::new(Semaphore::new(1)),
+            router_info: Mutex::new(Value::Null),
+            access_policy: Mutex::new(Value::Null),
+            speed_limits: Mutex::new(Value::Null),
+            latencies: Mutex::new(Value::Null),
+            block_verification: Mutex::new(json!({"id":"old", "status":"checking"})),
+            verification_cancel: watch::channel(0).0,
+            traffic_gate: Mutex::new(()),
+            traffic_history: Mutex::new(traffic::History::default()),
+        });
+        let guard = app.gate.lock().await;
+        let job = tokio::spawn(verify_block_later(
+            app.clone(),
+            RouterConfig {
+                kind: model::RouterKind::Movistar,
+                host: "192.168.66.1".into(),
+                user: "1234".into(),
+                password: String::new(),
+                ssh_fingerprint: None,
+            },
+            "02:00:00:00:00:01".into(),
+            "old".into(),
+            movistar_cli::Blacklist {
+                enabled: true,
+                blocked_macs: vec!["02:00:00:00:00:01".into()],
+            },
+            app.verification_cancel.subscribe(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
+        app.verification_cancel
+            .send_modify(|generation| *generation += 1);
+        *app.block_verification.lock().await = Value::Null;
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(1), job)
+            .await
+            .expect("verification should release the router promptly")
+            .expect("job completed");
+        assert!(app.block_verification.lock().await.is_null());
+        assert!(app.events.lock().await.is_empty());
+    }
 
     #[test]
     fn association_verification_requires_two_consecutive_complete_absences() {

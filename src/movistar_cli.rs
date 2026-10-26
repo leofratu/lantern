@@ -3,7 +3,7 @@ use crate::{
     model::{Result, RouterConfig, RouterKind, mac_address},
 };
 use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -177,7 +177,11 @@ async fn interactive(mut command: Command, request: &str) -> Result<String> {
             .await
             .map_err(|error| error.to_string())?;
         drop(input);
-        let _ = child.wait().await.map_err(|error| error.to_string())?;
+        // Some firmware leaves the SSH transport open after the final prompt.
+        // The command has already completed; do not wait a full minute for exit.
+        if timeout(Duration::from_secs(1), child.wait()).await.is_err() {
+            let _ = child.kill().await;
+        }
         Ok::<String, String>(reply)
     })
     .await;
@@ -198,7 +202,7 @@ async fn interactive(mut command: Command, request: &str) -> Result<String> {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Blacklist {
     pub enabled: bool,
     pub blocked_macs: Vec<String>,
@@ -311,7 +315,12 @@ pub async fn set_block(
 ) -> Result<Blacklist> {
     let mac = mac_address(mac)?;
     let before = blacklist(config).await?;
-    for command in block_plan(&before, &mac, blocked, enable_mode)? {
+    let commands = block_plan(&before, &mac, blocked, enable_mode)?;
+    if commands.is_empty() {
+        verify_change(&before, &before, &mac, blocked)?;
+        return Ok(before);
+    }
+    for command in commands {
         cli(config, &command).await.map_err(|error| format!("Blacklist change may be partially applied: {error}. Inspect gateway rules before retrying."))?;
     }
     // A fresh authenticated session is authoritative; a setter acknowledgement is not.
@@ -347,6 +356,18 @@ fn reported_deauthentication(reply: &str, mac: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_command_does_not_wait_for_a_stuck_ssh_exit() {
+        let mut shell = Command::new("sh");
+        shell.args(["-c", "printf '> '; IFS= read -r command; printf 'complete\\n> '; IFS= read -r command; exec sleep 30"]);
+        let start = std::time::Instant::now();
+        let reply = interactive(shell, "show blacklist")
+            .await
+            .expect("completed prompt");
+        assert!(reply.contains("complete"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
     #[test]
     fn command_echo_is_not_a_deauthentication_acknowledgement() {
         // Sanitized from this firmware's actual CLI reply; no real client identifier.

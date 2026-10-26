@@ -112,8 +112,9 @@ flowchart LR
     A[Read policy] --> B[Add selected MAC]
     B --> C[Read policy back]
     C --> D[Disconnect Wi-Fi]
-    D --> E[Check both radios]
-    E --> F[Report verified or partial]
+    D --> E[Report verified policy]
+    E --> F[Check both radios in background]
+    F --> G[Report verified or inconclusive]
 ```
 
 <details>
@@ -124,9 +125,9 @@ Lantern performs these steps:
 1. Reads the current blacklist through authenticated SSH.
 2. Adds only the selected MAC with native `add mac_blocked`. An existing entry is reused.
 3. Enables blacklist mode only when explicitly confirmed. This router disables whitelist mode when enabling its blacklist. If a disabled blacklist contains unrelated addresses, Lantern refuses to activate it because those devices would also be blocked.
-4. Reads the policy in a new SSH session and checks that unrelated entries were preserved.
+4. After a change, reads the policy in a new SSH session and checks that unrelated entries were preserved. If it already matches, the initial fresh read is sufficient.
 5. Sends the native disconnect command to end an existing association.
-6. Allows up to four radio checks for the filter to settle, requires two consecutive complete observations of absence, then reads the blacklist again.
+6. Returns control after the policy readback and disconnect command. In the background, it allows up to four bounded radio checks for the filter to settle, requires two consecutive complete observations of absence, then reads the blacklist again. A new block or unblock cancels the pending follow-up so it cannot delay or overwrite the new action.
 
 </details>
 
@@ -139,6 +140,7 @@ The router holds the policy without a timer or a Lantern keepalive process. Clos
 
 | Result | Evidence | Meaning |
 | --- | --- | --- |
+| Checking Wi-Fi disconnection | Blacklist readback succeeded; follow-up checks are running | The policy is installed, but disconnection has not yet been verified |
 | Block verified | Enabled blacklist contains the MAC; both radios omit it in two successive complete reads | Policy installed; selected MAC absent from this router's Wi-Fi associations during verification |
 | Policy verified, connection unverified | Enabled blacklist contains the MAC; radio checks are incomplete or still show it | Policy remains installed; disconnection is not claimed |
 | Failed or unknown | Rejected command, timeout, malformed response, missing entry, changed mode, or concurrent policy change | Inspect live policy before retrying; a write may have partially applied |

@@ -69,6 +69,12 @@ interface Snapshot {
   access_policy: Blacklist | null;
   speed_limits: { limits: DeviceLimit[] } | null;
   latencies: { policies: DeviceDelay[] } | null;
+  block_verification: {
+    id: string;
+    mac: string;
+    status: "checking" | "verified" | "inconclusive";
+    message: string;
+  } | null;
   devices: Device[];
   profiles: Profile[];
   events: Activity[];
@@ -160,6 +166,7 @@ let snapshot: Snapshot = {
   access_policy: null,
   speed_limits: null,
   latencies: null,
+  block_verification: null,
   devices: [],
   profiles: [],
   events: [],
@@ -228,7 +235,10 @@ function notice(message: string, error = false): void {
   }
 }
 
-async function operation(work: () => Promise<string>): Promise<void> {
+async function operation(
+  work: () => Promise<string>,
+  progress = "Working… waiting for the local service and gateway evidence.",
+): Promise<void> {
   if (busy) return;
   const previousDialog = document.querySelector("dialog[open]");
   busy = true;
@@ -241,10 +251,15 @@ async function operation(work: () => Promise<string>): Promise<void> {
   buttons.forEach((button) => {
     button.disabled = true;
   });
-  notice("Working… waiting for the local service and gateway evidence.");
+  notice(
+    trafficBusy
+      ? "Finishing the current network traffic read before contacting the router…"
+      : progress,
+  );
   try {
     // Avoid logging in to the router for telemetry while an action is using it.
     await trafficCompletion;
+    notice(progress);
     const message = await work();
     try {
       await sync();
@@ -430,6 +445,7 @@ function renderTraffic(): void {
 async function refreshTraffic(): Promise<void> {
   if (
     trafficBusy ||
+    snapshot.block_verification?.status === "checking" ||
     !snapshot.gateway ||
     document.hidden ||
     el("network-page").hidden
@@ -509,8 +525,7 @@ async function refreshTraffic(): Promise<void> {
   } finally {
     trafficBusy = false;
     finishTraffic();
-    el<HTMLButtonElement>("traffic-refresh").disabled =
-      busy || !snapshot.gateway;
+    applyCapabilities();
   }
 }
 
@@ -528,9 +543,26 @@ setInterval(() => {
   if (!busy) void refreshTraffic();
 }, 10_000);
 
+setInterval(() => {
+  const current = snapshot.block_verification;
+  if (busy || current?.status !== "checking") return;
+  void sync()
+    .then(() => {
+      const next = snapshot.block_verification;
+      if (!busy && next?.id === current.id && next.status !== "checking")
+        notice(next.message, next.status === "inconclusive");
+    })
+    .catch(() => {
+      /* Keep the pending status; the next poll can retry. */
+    });
+}, 3_000);
+
 function applyCapabilities(): void {
   el<HTMLButtonElement>("traffic-refresh").disabled =
-    busy || trafficBusy || !snapshot.gateway;
+    busy ||
+    trafficBusy ||
+    !snapshot.gateway ||
+    snapshot.block_verification?.status === "checking";
   el<HTMLButtonElement>("inspect-rules").disabled =
     busy ||
     !snapshot.gateway ||
@@ -622,7 +654,12 @@ function accessBadge(mac: string): string {
     policy.scope === "forwarding"
       ? "Lantern forwarding policy"
       : "Router blacklist";
-  return `<span class="badge ${banned ? "access-banned" : "access-allowed"}">${banned ? "Banned" : "Not banned"}</span><small class="access-observation" title="${escape(scope)}">Checked ${escape(checked)}</small>`;
+  const verification = snapshot.block_verification;
+  const detail =
+    verification?.mac === mac
+      ? `<small class="access-observation">${verification.status === "checking" ? "Checking Wi-Fi disconnection…" : verification.status === "verified" ? "Wi-Fi disconnection verified" : "Wi-Fi disconnection unconfirmed"}</small>`
+      : "";
+  return `<span class="badge ${banned ? "access-banned" : "access-allowed"}">${banned ? "Banned" : "Not banned"}</span><small class="access-observation" title="${escape(scope)}">Checked ${escape(checked)}</small>${detail}`;
 }
 
 function speedBadge(mac: string): string {
@@ -995,7 +1032,7 @@ async function actOnDevice(mac: string, action: string): Promise<void> {
       ? `Disconnect ${mac} from the gateway’s Wi-Fi.${snapshot.gateway?.kind === "openwrt" ? " A 60-second reconnect ban is requested." : " The device may reconnect immediately."} Selecting your own device may interrupt this session.`
       : movistar
         ? action === "block"
-          ? `Store ${mac} in the router blacklist until you unblock it, then verify the policy and two successive reads of both radios. Selecting your own device will interrupt its connection.${enableMode ? " This also enables blacklist mode, which disables this router’s whitelist mode. Existing unrelated blacklist entries will prevent this mode change." : ""}`
+          ? `Store ${mac} in the router blacklist until you unblock it. The blacklist is verified first; two radio checks continue in the background. Selecting your own device will interrupt its connection.${enableMode ? " This also enables blacklist mode, which disables this router’s whitelist mode. Existing unrelated blacklist entries will prevent this mode change." : ""}`
           : `Remove only ${mac} from the router blacklist and verify its absence. Other blocked addresses and the filter mode are preserved.`
         : action === "block"
           ? `Block routed traffic from ${mac} at this gateway. Existing offloaded connections may continue. You can remove this rule later.`
@@ -1022,21 +1059,26 @@ async function actOnDevice(mac: string, action: string): Promise<void> {
     ))
   )
     return;
-  await operation(async () => {
-    const result = await api<Mutation>("device", "POST", {
-      mac,
-      action,
-      enable_blacklist: enableMode,
-    });
-    if (
-      result.outcome === "command_sent" ||
-      result.outcome === "block_policy_verified"
-    )
-      throw new Error(result.message);
-    modal("device-dialog").close();
-    modal("rules-dialog").close();
-    return result.message;
-  });
+  await operation(
+    async () => {
+      const result = await api<Mutation>("device", "POST", {
+        mac,
+        action,
+        enable_blacklist: enableMode,
+      });
+      if (
+        result.outcome === "command_sent" ||
+        result.outcome === "block_policy_verified"
+      )
+        throw new Error(result.message);
+      modal("device-dialog").close();
+      modal("rules-dialog").close();
+      return result.message;
+    },
+    movistar && action !== "kick"
+      ? "Updating the router blacklist and verifying the result. Router configuration writes can take a minute."
+      : undefined,
+  );
 }
 
 document.querySelectorAll<HTMLButtonElement>("[data-page]").forEach((button) =>
