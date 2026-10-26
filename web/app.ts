@@ -43,6 +43,8 @@ interface RouterInfo {
 interface Blacklist {
   enabled: boolean;
   blocked_macs: string[];
+  checked_at?: number;
+  scope?: string;
 }
 interface Profile {
   id: string;
@@ -65,6 +67,7 @@ interface Snapshot {
   gateway: Gateway | null;
   router_info: RouterInfo | null;
   access_policy: Blacklist | null;
+  speed_limits: { limits: DeviceLimit[] } | null;
   devices: Device[];
   profiles: Profile[];
   events: Activity[];
@@ -72,6 +75,27 @@ interface Snapshot {
 interface Mutation {
   message: string;
   outcome?: string;
+}
+interface DeviceLimit {
+  mac: string;
+  interface: string;
+  up_kbps: number;
+  down_kbps: number;
+  up_dropped_bytes: number;
+  down_dropped_bytes: number;
+}
+interface LimitResponse extends Mutation {
+  limits: DeviceLimit[];
+}
+interface PingResponse {
+  message: string;
+  ping: {
+    ip: string;
+    sent: number;
+    received: number;
+    loss_percent: number;
+    roundtrip_ms: number[];
+  };
 }
 interface NftRule {
   comment?: string;
@@ -109,6 +133,7 @@ let snapshot: Snapshot = {
   gateway: null,
   router_info: null,
   access_policy: null,
+  speed_limits: null,
   devices: [],
   profiles: [],
   events: [],
@@ -120,6 +145,8 @@ let renderedDevices = "";
 let renderedProfiles = "";
 let renderedEvents = "";
 let syncSequence = 0;
+let pingTarget: string | null = null;
+let limitTarget: string | null = null;
 
 async function api<T>(
   path: string,
@@ -270,6 +297,36 @@ function applyCapabilities(): void {
     (snapshot.gateway.kind === "movistar" && !snapshot.gateway.ssh_fingerprint);
   el<HTMLButtonElement>("router-information").disabled =
     busy || snapshot.gateway?.kind !== "movistar";
+  const canControl = Boolean(
+    snapshot.gateway &&
+    (snapshot.gateway.kind === "openwrt" || snapshot.gateway.ssh_fingerprint),
+  );
+  el<HTMLButtonElement>("refresh-access").disabled = busy || !canControl;
+  const canLimit = snapshot.gateway?.kind === "openwrt";
+  el<HTMLButtonElement>("inspect-limits").disabled = busy || !canLimit;
+  document
+    .querySelectorAll<HTMLInputElement>("#limit-form input")
+    .forEach((input) => {
+      input.disabled = busy || !canLimit;
+    });
+  el<HTMLButtonElement>("apply-limit").disabled =
+    busy || !canLimit || !limitTarget;
+  el<HTMLButtonElement>("remove-limit").disabled =
+    busy || !canLimit || !limitTarget;
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-action]")
+    .forEach((button) => {
+      button.disabled = busy || !canControl;
+    });
+  document
+    .querySelectorAll<HTMLButtonElement>("[data-ping]")
+    .forEach((button) => {
+      button.disabled = busy;
+    });
+  el<HTMLButtonElement>("ping-again").disabled =
+    busy ||
+    !pingTarget ||
+    !snapshot.devices.some((device) => device.mac === pingTarget);
 }
 
 function renderDevices(): void {
@@ -279,7 +336,13 @@ function renderDevices(): void {
       .toLowerCase()
       .includes(search),
   );
-  const key = JSON.stringify([search, devices]);
+  const key = JSON.stringify([
+    search,
+    devices,
+    snapshot.access_policy,
+    snapshot.speed_limits,
+    snapshot.gateway,
+  ]);
   if (key === renderedDevices) return;
   renderedDevices = key;
   el("device-empty").hidden = devices.length > 0;
@@ -296,10 +359,158 @@ function renderDevices(): void {
   el("devices").innerHTML = devices
     .map(
       (d) =>
-        `<tr><td><div class="device-name"><span class="device-initial" aria-hidden="true">${d.identity.category.startsWith("Phone") ? "▯" : "▣"}</span><div><strong>${escape(d.identity.display_name ?? d.name)}</strong><small>${escape(d.identity.manufacturer ?? d.identity.mac_kind)}</small>${d.identity.model ? `<small>${escape(d.identity.model)}</small>` : ""}</div></div></td><td>${escape(d.ip)}</td><td class="code">${escape(d.mac)}</td><td><span class="badge">${escape(d.presence)}</span></td><td><button class="text-button" data-device="${escape(d.mac)}" aria-label="Manage ${escape(d.identity.display_name ?? d.name)}">Details</button></td></tr>`,
+        `<tr><td><div class="device-name"><span class="device-initial" aria-hidden="true">${d.identity.category.startsWith("Phone") ? "▯" : "▣"}</span><div><strong>${escape(d.identity.display_name ?? d.name)}</strong><small>${escape(d.identity.manufacturer ?? d.identity.mac_kind)}</small>${d.identity.model ? `<small>${escape(d.identity.model)}</small>` : ""}</div></div></td><td>${escape(d.ip)}</td><td class="code">${escape(d.mac)}</td><td>${accessBadge(d.mac)}${speedBadge(d.mac)}<small class="access-observation">${escape(d.presence)}</small></td><td><div class="row-actions"><button class="secondary" data-ping="${escape(d.mac)}" aria-label="Ping ${escape(d.identity.display_name ?? d.name)}">Ping</button><button class="secondary" data-device="${escape(d.mac)}" aria-label="Manage ${escape(d.identity.display_name ?? d.name)}">Details</button><button class="danger" data-action="block" data-mac="${escape(d.mac)}" aria-label="Ban ${escape(d.identity.display_name ?? d.name)}">Ban</button><button class="secondary" data-action="unblock" data-mac="${escape(d.mac)}" aria-label="Unban ${escape(d.identity.display_name ?? d.name)}">Unban</button><button class="secondary row-speed" data-speed="${escape(d.mac)}" aria-label="Speed limit ${escape(d.identity.display_name ?? d.name)}">Speed limit</button></div></td></tr>`,
     )
     .join("");
 }
+
+function accessBadge(mac: string): string {
+  const policy = snapshot.access_policy;
+  if (!policy)
+    return '<span class="badge access-unknown">Unknown · refresh status</span>';
+  const banned = policy.enabled && policy.blocked_macs.includes(mac);
+  const checked = policy.checked_at
+    ? new Date(policy.checked_at * 1000).toLocaleTimeString()
+    : "last router read";
+  const scope =
+    policy.scope === "forwarding"
+      ? "Lantern forwarding policy"
+      : "Router blacklist";
+  return `<span class="badge ${banned ? "access-banned" : "access-allowed"}">${banned ? "Banned" : "Not banned"}</span><small class="access-observation" title="${escape(scope)}">Checked ${escape(checked)}</small>`;
+}
+
+function speedBadge(mac: string): string {
+  if (snapshot.gateway?.kind !== "openwrt")
+    return '<small class="access-observation">Speed caps need OpenWrt</small>';
+  if (!snapshot.speed_limits)
+    return '<small class="access-observation">Speed cap unknown</small>';
+  const limit = snapshot.speed_limits.limits.find((limit) => limit.mac === mac);
+  return `<small class="access-observation">${limit ? `↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps` : "No Lantern speed cap"}</small>`;
+}
+
+function openLimit(mac: string): void {
+  limitTarget = mac;
+  const device = snapshot.devices.find((device) => device.mac === mac);
+  const limit = snapshot.speed_limits?.limits.find(
+    (limit) => limit.mac === mac,
+  );
+  el("limit-title").textContent =
+    `Speed limit · ${device?.identity.display_name ?? device?.name ?? mac}`;
+  el("limit-target").textContent = device ? `${device.ip} · ${mac}` : mac;
+  el("limit-support").textContent =
+    snapshot.gateway?.kind === "openwrt"
+      ? "Applies to this MAC on its directly connected OpenWrt LAN interface. Requires ip-full, nftables netdev ingress/egress support, and disabled flow offloading. Other devices keep their own budgets."
+      : "Connect an OpenWrt gateway in the device’s traffic path to enforce these limits. The connected Movistar firmware exposes priority controls, without a verified bandwidth-cap API. Local app proxy limits are available under App bandwidth.";
+  const form = el<HTMLFormElement>("limit-form");
+  field(form, "down").value = String(limit ? limit.down_kbps / 1000 : 10);
+  field(form, "up").value = String(limit ? limit.up_kbps / 1000 : 10);
+  modal("limit-dialog").showModal();
+  applyCapabilities();
+}
+
+el("limit-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (busy || !limitTarget || snapshot.gateway?.kind !== "openwrt") return;
+  const mac = limitTarget;
+  const form = el<HTMLFormElement>("limit-form");
+  const down = Math.round(Number(field(form, "down").value) * 1000);
+  const up = Math.round(Number(field(form, "up").value) * 1000);
+  void (async () => {
+    if (
+      !(await confirmAction(
+        "Apply device speed cap?",
+        `Limit ${mac} to ${down / 1000} Mbps download and ${up / 1000} Mbps upload at OpenWrt. Excess packets will be dropped above those budgets. Rules are runtime-only.`,
+        "Apply limit",
+      ))
+    )
+      return;
+    await operation(async () => {
+      const result = await api<LimitResponse>("device/limit", "POST", {
+        mac,
+        up_kbps: up,
+        down_kbps: down,
+      });
+      modal("limit-dialog").close();
+      modal("limit-list-dialog").close();
+      return result.message;
+    });
+  })();
+});
+
+el("remove-limit").addEventListener("click", () => {
+  if (busy || !limitTarget || snapshot.gateway?.kind !== "openwrt") return;
+  const mac = limitTarget;
+  void (async () => {
+    if (
+      !(await confirmAction(
+        "Remove this speed cap?",
+        `Remove both Lantern rate policies for ${mac}. Other devices’ caps are preserved.`,
+        "Remove limit",
+      ))
+    )
+      return;
+    await operation(async () => {
+      const result = await api<LimitResponse>("device/limit", "POST", {
+        mac,
+        up_kbps: 0,
+        down_kbps: 0,
+      });
+      modal("limit-dialog").close();
+      modal("limit-list-dialog").close();
+      return result.message;
+    });
+  })();
+});
+
+el("inspect-limits").addEventListener("click", () => {
+  void operation(async () => {
+    const result = await api<LimitResponse>("limits", "POST", {});
+    el("limit-list-results").innerHTML =
+      `<p>${escape(result.message)}</p>${result.limits.length ? result.limits.map((limit) => `<div class="rule"><div><strong class="code">${escape(limit.mac)}</strong><p>↓ ${limit.down_kbps / 1000} / ↑ ${limit.up_kbps / 1000} Mbps · ${escape(limit.interface)}</p><p>Dropped: ↑ ${bytes(limit.up_dropped_bytes)} · ↓ ${bytes(limit.down_dropped_bytes)}</p></div><button class="secondary" data-speed="${escape(limit.mac)}">Edit / remove</button></div>`).join("") : "<p>No Lantern device speed caps are installed.</p>"}`;
+    modal("limit-list-dialog").showModal();
+    return result.message;
+  });
+});
+
+el("refresh-access").addEventListener("click", () => {
+  void operation(async () => (await api<Mutation>("access", "POST")).message);
+});
+
+async function pingDevice(mac: string): Promise<void> {
+  if (busy) return;
+  const device = snapshot.devices.find((device) => device.mac === mac);
+  if (!device) {
+    notice("Refresh inventory before pinging this device.", true);
+    return;
+  }
+  pingTarget = mac;
+  el("ping-title").textContent =
+    `Ping ${device.identity.display_name ?? device.name}`;
+  el("ping-target").textContent = `${device.ip} · ${device.mac}`;
+  el("ping-results").textContent = "Sending 3 ICMP echo requests…";
+  if (!modal("ping-dialog").open) modal("ping-dialog").showModal();
+  await operation(async () => {
+    try {
+      const result = await api<PingResponse>("device/ping", "POST", { mac });
+      const { ping } = result;
+      const average = ping.roundtrip_ms.length
+        ? ping.roundtrip_ms.reduce((sum, time) => sum + time, 0) /
+          ping.roundtrip_ms.length
+        : null;
+      el("ping-results").innerHTML =
+        `<div class="ping-metrics"><div><span>Replies</span><strong>${ping.received} / ${ping.sent}</strong></div><div><span>Packet loss</span><strong>${ping.loss_percent.toFixed(0)}%</strong></div><div><span>Average RTT</span><strong>${average === null ? "—" : `${average.toFixed(2)} ms`}</strong></div></div><p>${ping.received ? "ICMP replies received" : "No ICMP replies"} · ${escape(new Date().toLocaleTimeString())}</p>${ping.roundtrip_ms.length ? `<div class="ping-samples">${ping.roundtrip_ms.map((time) => `<span>${time.toFixed(2)} ms</span>`).join("")}</div>` : ""}`;
+      return result.message;
+    } catch (error) {
+      el("ping-results").textContent =
+        "Ping could not complete. Reachability is unknown.";
+      throw error;
+    }
+  });
+}
+
+el("ping-again").addEventListener("click", () => {
+  if (pingTarget) void pingDevice(pingTarget);
+});
 
 function bytes(n: number): string {
   if (n < 1000) return `${n} B`;
@@ -643,8 +854,18 @@ document.addEventListener("click", (event) => {
       el("router-info-results").append(output);
       return result.message;
     });
-  const { device, editProfile, stopProfile, action, mac, identify } =
-    button.dataset;
+  const {
+    device,
+    editProfile,
+    stopProfile,
+    action,
+    mac,
+    identify,
+    ping,
+    speed,
+  } = button.dataset;
+  if (speed) openLimit(speed);
+  if (ping) void pingDevice(ping);
   if (identify)
     void operation(async () => {
       const result = await api<Mutation>("device/identify", "POST", {

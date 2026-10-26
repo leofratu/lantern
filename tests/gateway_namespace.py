@@ -66,6 +66,7 @@ def main():
             assert any(d["mac"] == "02:aa:bb:cc:dd:ee" for d in state["devices"])
             action = {"mac": "02:aa:bb:cc:dd:ee", "action": "block"}
             assert api("device", action)["outcome"] == "rule_verified"
+            assert api("state", method="GET")["access_policy"]["blocked_macs"] == [action["mac"]]
             # Repeating block must not duplicate a rule.
             api("device", action)
             rules = api("rules")["rules"]
@@ -86,12 +87,14 @@ def main():
             api("device", action)
             api("device", action)
             assert len(api("rules")["rules"]) == 1
+            assert action["mac"] not in api("state", method="GET")["access_policy"]["blocked_macs"]
             subprocess.run(["nft", "list", "table", "inet", "unrelated_test"], check=True, stdout=subprocess.DEVNULL)
             # A retained comment cannot turn an ACCEPT into verified enforcement.
             remaining = api("rules")["rules"][0]
             subprocess.run(["nft", "replace", "rule", "inet", "lantern_v1", "forward", "handle", str(remaining["handle"]), "ether", "saddr", "02:aa:bb:cc:dd:ef", "counter", "accept", "comment", '"lantern:02:aa:bb:cc:dd:ef"'], check=True)
             result = api("device", {"mac": "02:aa:bb:cc:dd:ef", "action": "block"}, expected=400)
             assert "unverified" in result["error"]
+            assert api("state", method="GET")["access_policy"] is None
             # Never adopt another program's table merely because its name matches.
             subprocess.run(["nft", "delete", "table", "inet", "lantern_v1"], check=True)
             subprocess.run(["nft", "add", "table", "inet", "lantern_v1"], check=True)

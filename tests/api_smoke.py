@@ -62,8 +62,13 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(self.request("/api/device", "POST", {"mac": "02:aa:bb:cc:dd:ee", "action": "block"})[0], 400)
         self.assertEqual(self.request("/api/profiles", "POST", {"name": "x", "down_kbps": 0, "up_kbps": 80})[0], 400)
         self.assertEqual(self.request("/api/device/identify", "POST", {"mac": "02:aa:bb:cc:dd:ee"})[0], 400)
+        self.assertEqual(self.request("/api/device/ping", "POST", {"mac": "02:aa:bb:cc:dd:ee"})[0], 400)
+        self.assertEqual(self.request("/api/device/ping", "POST", {"mac": "02:aa:bb:cc:dd:ee", "ip": "8.8.8.8"})[0], 422)
         self.assertEqual(self.request("/api/router/ssh/probe", "POST", {"kind":"movistar", "host":"8.8.8.8"})[0],400)
         self.assertEqual(self.request("/api/router/cli/status", "POST")[0],400)
+        self.assertEqual(self.request("/api/access", "POST")[0],400)
+        self.assertEqual(self.request("/api/limits", "POST")[0],400)
+        self.assertEqual(self.request("/api/device/limit", "POST", {"mac":"02:aa:bb:cc:dd:ee","up_kbps":63,"down_kbps":1000})[0],400)
 
     def test_profile_lifecycle_uses_real_handler_responses(self):
         status, body, _ = self.request("/api/profiles", "POST", {"name": "Test browser", "down_kbps": 800, "up_kbps": 80})

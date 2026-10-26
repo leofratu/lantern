@@ -1,8 +1,10 @@
 mod discovery;
 mod identity;
+mod limits;
 mod model;
 mod movistar_cli;
 mod proxy;
+mod reachability;
 mod router;
 
 use axum::{
@@ -39,6 +41,7 @@ struct App {
     capacity: Arc<Semaphore>,
     router_info: Mutex<Value>,
     access_policy: Mutex<Value>,
+    speed_limits: Mutex<Value>,
 }
 
 struct ApiError(String);
@@ -55,6 +58,14 @@ impl IntoResponse for ApiError {
 type ApiResult = std::result::Result<Json<Value>, ApiError>;
 
 impl App {
+    async fn cache_policy(&self, mut policy: Value) {
+        policy["checked_at"] = json!(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs())
+        );
+        *self.access_policy.lock().await = policy;
+    }
     async fn event(&self, message: String, outcome: &str) {
         let mut events = self.events.lock().await;
         if events.len() == 100 {
@@ -124,7 +135,7 @@ async fn state(State(app): State<Arc<App>>) -> Json<Value> {
         views.push(profile.view().await);
     }
     Json(
-        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
+        json!({"platform":std::env::consts::OS, "gateway":gateway, "router_info":app.router_info.lock().await.clone(), "access_policy":app.access_policy.lock().await.clone(), "speed_limits":app.speed_limits.lock().await.clone(), "devices":app.devices.lock().await.clone(), "profiles":views, "events":app.events.lock().await.clone()}),
     )
 }
 
@@ -139,16 +150,33 @@ async fn connect(State(app): State<Arc<App>>, Json(config): Json<RouterConfig>) 
             identity::enrich(&mut devices);
             identity::inspect_inventory(&mut devices, config.host.parse().ok()).await;
             *app.devices.lock().await = devices;
+            let access = router::access_policy(&config).await;
+            let speed = if matches!(config.kind, model::RouterKind::Openwrt) {
+                limits::status(&config)
+                    .await
+                    .ok()
+                    .map(|limits| json!({"limits":limits}))
+            } else {
+                None
+            };
             *app.config.lock().await = Some(config);
             *app.router_info.lock().await = Value::Null;
             *app.access_policy.lock().await = Value::Null;
+            *app.speed_limits.lock().await = speed.unwrap_or(Value::Null);
+            let policy_note = match access {
+                Ok(policy) => {
+                    app.cache_policy(policy).await;
+                    String::new()
+                }
+                Err(error) => format!(" Access status is unknown: {error}"),
+            };
             app.event(
                 "Gateway connected; device inventory updated".into(),
                 "success",
             )
             .await;
             Ok(Json(
-                json!({"message":"Gateway connected. Credentials are held in memory until exit."}),
+                json!({"message":format!("Gateway connected. Credentials are held in memory until exit.{policy_note}")}),
             ))
         }
         Err(error) => {
@@ -201,6 +229,7 @@ async fn disconnect(State(app): State<Arc<App>>) -> ApiResult {
     *app.config.lock().await = None;
     *app.router_info.lock().await = Value::Null;
     *app.access_policy.lock().await = Value::Null;
+    *app.speed_limits.lock().await = Value::Null;
     app.devices.lock().await.clear();
     app.event(
         "Gateway session disconnected. Existing gateway rules remain in place.".into(),
@@ -216,6 +245,32 @@ async fn disconnect(State(app): State<Arc<App>>) -> ApiResult {
 #[serde(deny_unknown_fields)]
 struct IdentifyDevice {
     mac: String,
+}
+
+async fn ping_device(State(app): State<Arc<App>>, Json(input): Json<IdentifyDevice>) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    let mac = model::mac_address(&input.mac)?;
+    let device = app
+        .devices
+        .lock()
+        .await
+        .iter()
+        .find(|device| device.mac == mac)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError("Refresh inventory and select an observed device before pinging".into())
+        })?;
+    let ip = device
+        .ip
+        .parse()
+        .map_err(|_| ApiError("Device has no valid IPv4 address".into()))?;
+    let result = reachability::ping(ip).await?;
+    Ok(Json(
+        json!({"message":format!("{} of {} ICMP replies. A missing reply does not prove blocking; devices can ignore ICMP.",result.received,result.sent),"ping":result}),
+    ))
 }
 
 async fn identify_device(
@@ -300,9 +355,85 @@ async fn cli_status(State(app): State<Arc<App>>) -> ApiResult {
         .gate
         .try_lock()
         .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    *app.access_policy.lock().await = Value::Null;
     let policy = movistar_cli::status(&app.configured().await?).await?;
-    *app.access_policy.lock().await = policy.clone();
+    app.cache_policy(policy.clone()).await;
     Ok(Json(policy))
+}
+
+async fn access_status(State(app): State<Arc<App>>) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    *app.access_policy.lock().await = Value::Null;
+    let policy = router::access_policy(&app.configured().await?).await?;
+    app.cache_policy(policy).await;
+    Ok(Json(
+        json!({"message":"Ban status refreshed from the router."}),
+    ))
+}
+
+async fn limit_status(State(app): State<Arc<App>>) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    *app.speed_limits.lock().await = Value::Null;
+    let limits = limits::status(&app.configured().await?).await?;
+    let value = json!({"limits":limits,"message":"Device speed-cap policies refreshed from OpenWrt. Counters report excess traffic dropped; policies clear on gateway reboot."});
+    *app.speed_limits.lock().await = value.clone();
+    Ok(Json(value))
+}
+
+async fn set_limit(
+    State(app): State<Arc<App>>,
+    Json(input): Json<limits::LimitInput>,
+) -> ApiResult {
+    let _guard = app
+        .gate
+        .try_lock()
+        .map_err(|_| ApiError("Another operation is in progress".into()))?;
+    let mac = input.validate()?;
+    let config = app.configured().await?;
+    let device = app
+        .devices
+        .lock()
+        .await
+        .iter()
+        .find(|device| device.mac == mac)
+        .cloned();
+    if input.up_kbps != 0 && device.is_none() {
+        return Err(ApiError(
+            "Refresh inventory and select an observed device before setting a speed cap".into(),
+        ));
+    }
+    *app.speed_limits.lock().await = Value::Null;
+    match limits::set(
+        &config,
+        &input,
+        device.as_ref().map(|device| device.ip.as_str()),
+    )
+    .await
+    {
+        Ok(value) => {
+            *app.speed_limits.lock().await = json!({"limits":value["limits"]});
+            app.event(
+                format!(
+                    "Speed cap {mac}: {}",
+                    value["message"].as_str().unwrap_or("Readback completed")
+                ),
+                "rule_verified",
+            )
+            .await;
+            Ok(Json(value))
+        }
+        Err(error) => {
+            app.event(format!("Speed cap {mac}: {error}"), "failed_or_unknown")
+                .await;
+            Err(error.into())
+        }
+    }
 }
 
 fn associated(information: &Value, mac: &str) -> bool {
@@ -346,8 +477,8 @@ async fn persistent_movistar_block(
     // Invalidate cached policy before any write; a failed read must not display stale success.
     *app.access_policy.lock().await = Value::Null;
     let policy = movistar_cli::set_block(config, mac, blocked, enable_mode).await?;
-    *app.access_policy.lock().await =
-        serde_json::to_value(&policy).map_err(|error| error.to_string())?;
+    app.cache_policy(serde_json::to_value(&policy).map_err(|error| error.to_string())?)
+        .await;
     if !blocked {
         return Ok(
             json!({"outcome":"unblock_verified","message":"This MAC was removed from the router blacklist and absence was verified in a fresh SSH session. Other entries and the filter mode were preserved. The device can reconnect when it is ready."}),
@@ -379,8 +510,8 @@ async fn persistent_movistar_block(
         }
     }
     let final_policy = movistar_cli::blacklist(config).await?;
-    *app.access_policy.lock().await =
-        serde_json::to_value(&final_policy).map_err(|error| error.to_string())?;
+    app.cache_policy(serde_json::to_value(&final_policy).map_err(|error| error.to_string())?)
+        .await;
     if !final_policy.enabled
         || !final_policy.contains(mac)
         || final_policy.blocked_macs != policy.blocked_macs
@@ -406,6 +537,9 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
         return Err(ApiError(
             "Refresh inventory and select an observed device".into(),
         ));
+    }
+    if matches!(input.action.as_str(), "block" | "unblock") {
+        *app.access_policy.lock().await = Value::Null;
     }
     let result = match input.action.as_str() {
         "block" | "unblock" if matches!(config.kind, model::RouterKind::Movistar) => {
@@ -454,6 +588,14 @@ async fn device_action(State(app): State<Arc<App>>, Json(input): Json<DeviceActi
     };
     match result {
         Ok(value) => {
+            if matches!(config.kind, model::RouterKind::Openwrt)
+                && matches!(input.action.as_str(), "block" | "unblock")
+            {
+                *app.access_policy.lock().await = Value::Null;
+                if let Ok(policy) = router::access_policy(&config).await {
+                    app.cache_policy(policy).await;
+                }
+            }
             app.event(
                 format!(
                     "{} {mac}: {}",
@@ -490,17 +632,22 @@ async fn rules(State(app): State<Arc<App>>) -> ApiResult {
         .try_lock()
         .map_err(|_| ApiError("Another operation is in progress".into()))?;
     let config = app.configured().await?;
+    *app.access_policy.lock().await = Value::Null;
     if matches!(config.kind, model::RouterKind::Movistar) {
         *app.access_policy.lock().await = Value::Null;
         let policy = movistar_cli::status(&config).await?;
-        *app.access_policy.lock().await = policy.clone();
+        app.cache_policy(policy.clone()).await;
         let information = router::movistar_information(&config).await?;
         *app.router_info.lock().await = information.clone();
         return Ok(Json(
             json!({"kind":"movistar","blacklist":policy,"router_info":information,"message":"Fresh router blacklist and Wi-Fi association readback. A listed MAC is blocked only while blacklist mode is enabled; incomplete radio reads cannot prove absence."}),
         ));
     }
-    Ok(Json(router::rule_status(&config).await?))
+    let result = router::rule_status(&config).await?;
+    *app.access_policy.lock().await = Value::Null;
+    app.cache_policy(router::access_policy(&config).await?)
+        .await;
+    Ok(Json(result))
 }
 
 async fn add_profile(State(app): State<Arc<App>>, Json(input): Json<ProfileInput>) -> ApiResult {
@@ -605,10 +752,14 @@ fn routes(app: Arc<App>) -> Router {
             }),
         )
         .route("/api/device/identify", post(identify_device))
+        .route("/api/device/ping", post(ping_device))
         .route("/api/router/ssh/probe", post(ssh_probe))
         .route("/api/router/inspect", post(inspect_router))
         .route("/api/router/cli/status", post(cli_status))
         .route("/api/rules", post(rules))
+        .route("/api/access", post(access_status))
+        .route("/api/limits", post(limit_status))
+        .route("/api/device/limit", post(set_limit))
         .route("/api/profiles", post(add_profile))
         .route(
             "/api/profiles/{id}",
@@ -668,6 +819,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         capacity: Arc::new(Semaphore::new(128)),
         router_info: Mutex::new(Value::Null),
         access_policy: Mutex::new(Value::Null),
+        speed_limits: Mutex::new(Value::Null),
     });
     println!(
         "Lantern 0.1.0 — {url}\nNo gateway connected. No network changes made. Ctrl+C to quit."

@@ -86,6 +86,7 @@ Other router models and firmware need validation. See [what was actually tested]
 | Unblock an absent device | From the router blacklist | From the rules list | Not available |
 | Disconnect once | Native command and radio readback | hostapd disconnect, requested 60-second ban | Not available |
 | App bandwidth limits | Local SOCKS5 TCP proxy profiles | Same | Same |
+| Device upload/download caps | No verified rate-cap API | MAC-based netdev rate policies, counters, and removal | Not available |
 
 </details>
 
@@ -174,6 +175,16 @@ A MAC block applies to that address on the managed router. It cannot follow a de
 
 Configure key-based SSH access outside Lantern and verify the host key with your normal client. Select **OpenWrt** in Gateway settings, enter the private IPv4 address and username, and connect. The account needs access to leases, neighbors, nftables, and hostapd as applicable.
 
+#### Device speed limits
+
+Choose **Speed limit** on a device row, set upload and download values in Mbps, and confirm. These are device rate caps on the OpenWrt LAN interface, separate from the local app proxies. They require the device's traffic to pass through OpenWrt, `ip-full` with JSON support, nftables with netdev ingress/egress support, and a kernel supporting both hooks. Lantern refuses to install caps while OpenWrt flow offloading is enabled or a flowtable is present; it does not change those global settings automatically.
+
+The adapter resolves the device's directly connected route and verifies its current neighbor MAC before writing. It installs separate source-MAC ingress and destination-MAC egress rules in an owned `netdev lantern_rate_v1` table. Readback verifies the match, byte rate, 16 KiB burst, drop action, counters, hook, and device binding. Other device limits are preserved. IPv4 and IPv6 frames using the selected MAC share the corresponding directional budget.
+
+Excess packets are dropped above the budget. This is policing, not smooth queue shaping; packet bursts and TCP recovery affect observed transfer rates. Hardware/driver behavior and traffic that bypasses the selected interface still require physical validation. These runtime rules clear on gateway reboot.
+
+Use **Inspect speed limits** to read current caps and dropped-byte counters, edit values, or remove both directions. This also works after a device vanishes from inventory. If an altered rule prevents safe automatic editing, an administrator can inspect and delete only `table netdev lantern_rate_v1` to remove all Lantern device caps. Other router policies remain separate.
+
 <details>
 <summary><strong>Firewall behavior, rule lifetime, and recovery</strong></summary>
 
@@ -190,6 +201,10 @@ Wi-Fi disconnect uses authenticated `ubus hostapd.* del_client` calls, requests 
 ---
 
 ## Device identification
+
+Every device row has **Ban**, **Unban**, **Ping**, **Speed limit**, and **Details** controls. Ban/Unban require a supported gateway connection; device speed caps require OpenWrt. Access badges explicitly show **Banned**, **Not banned**, or **Unknown**, with a router-read timestamp. **Refresh ban status** reads current policy; OpenWrt status covers Lantern's forwarding rules, while Movistar status covers its native blacklist. Other router restrictions can still apply.
+
+Ping sends three ICMP requests from your computer and displays replies, packet loss, and round-trip times. A missing ICMP reply is not proof that the device is offline or blocked. Narrow windows keep controls beside each device instead of hiding them off-screen.
 
 Lantern combines observations instead of treating a hostname as an authenticated identity:
 
@@ -228,6 +243,8 @@ src/router.rs        Movistar HTTP telemetry and OpenWrt adapter
 src/movistar_cli.rs  Pinned SSH, scoped blacklist changes, strict readback
 src/identity.rs      Targeted identification and offline manufacturer lookup
 src/discovery.rs     Platform neighbor-cache discovery
+src/reachability.rs  Bounded ICMP checks for observed private IPv4 devices
+src/limits.rs        OpenWrt device rate policies, ownership, and readback
 src/proxy.rs         SOCKS5 relay, shared pacing, connection lifecycle
 src/model.rs         Shared models and boundary validation
 web/                 TypeScript, generated JavaScript, local styles
@@ -264,6 +281,7 @@ On Linux, run the firewall integration in its own user/network namespace:
 
 ```sh
 python3 tests/gateway_namespace.py target/debug/lantern
+python3 tests/rate_namespace.py target/debug/lantern
 ```
 
 It requires `unshare`, `ip`, `nft`, and unprivileged user namespaces. It refuses the host network namespace and substitutes only SSH transport; firewall responses come from the isolated kernel. Never substitute a production router for this environment.
@@ -294,7 +312,7 @@ Writes are serialized inside one Lantern process and guarded in the UI. Multiple
 
 ### Current limits
 
-Native installers, automatic updates, native process interception, router-level speed shaping, UDP shaping, continuous monitoring, and universal firmware discovery are not implemented.
+Native installers, automatic updates, native process interception, smooth router queue shaping, local proxy UDP shaping, continuous monitoring, and universal firmware discovery are not implemented. Movistar device rate caps remain unavailable; the OpenWrt adapter requires a separate compatible gateway in the traffic path.
 
 ## License
 

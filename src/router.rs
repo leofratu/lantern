@@ -9,7 +9,7 @@ use tokio::process::Command;
 const TABLE: &str = "lantern_v1";
 const OWNER: &str = "Managed by Lantern v1";
 
-async fn ssh(config: &RouterConfig, script: &str) -> Result<String> {
+pub(crate) async fn ssh(config: &RouterConfig, script: &str) -> Result<String> {
     config.validate()?;
     let mut cmd = Command::new("ssh");
     cmd.args([
@@ -413,6 +413,33 @@ pub async fn rule_status(config: &RouterConfig) -> Result<Value> {
         json!({"rules": items.iter().filter_map(|i| i.get("rule")).collect::<Vec<_>>(),
         "forward_hook_verified": forward_hook_verified,
         "message": "Read back from gateway; counters are evidence of dropped traffic, not Wi-Fi disconnection"}),
+    )
+}
+
+pub async fn access_policy(config: &RouterConfig) -> Result<Value> {
+    if matches!(config.kind, RouterKind::Movistar) {
+        return crate::movistar_cli::status(config).await;
+    }
+    let status = rule_status(config).await?;
+    let mut blocked = Vec::new();
+    for rule in status["rules"]
+        .as_array()
+        .ok_or("Gateway omitted its rule list")?
+    {
+        let Some(raw) = rule["comment"]
+            .as_str()
+            .and_then(|comment| comment.strip_prefix("lantern:"))
+        else {
+            continue;
+        };
+        let mac = mac_address(raw)?;
+        if status["forward_hook_verified"] != true || !is_forwarding_drop(rule, &mac) {
+            return Err("A Lantern rule has an altered match or hook. Ban status is unknown; inspect gateway rules.".into());
+        }
+        blocked.push(mac);
+    }
+    Ok(
+        json!({"enabled":true,"blocked_macs":blocked,"scope":"forwarding","message":"Lantern forwarding policies read from the gateway. Other firewall policies are outside this status."}),
     )
 }
 

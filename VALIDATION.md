@@ -9,13 +9,14 @@ This file distinguishes automated checks, live router observations, and unverifi
 | Strict TypeScript type checking and compilation | macOS, TypeScript 5.9 | Passed |
 | Frontend formatting check | Prettier, source HTML/CSS/TypeScript/configuration | Passed |
 | Rust formatting and Clippy with warnings denied | Isolated Linux x86-64 runner | Passed |
-| Rust tests | Linux x86-64 | 11 passed |
+| Rust tests | Linux x86-64 | 13 passed |
 | Real-service API smoke tests | Linux x86-64 and optimized native Apple Silicon macOS executable | 3 passed on each |
 | Real nftables namespace integration | Isolated Linux user/network namespace | Passed |
+| Device rate-cap integration | Isolated Linux bridge, ingress/egress hooks, real Ethernet traffic | Passed |
 | Optimized native macOS build | Apple Silicon, Rust 1.91.1 | Passed |
 | Native Windows build | Windows host unreachable over SSH | Not performed |
 
-The Linux run used a dedicated directory and one build job. Its output is retained locally in `blocking-validation.log`, excluded from Git. The runner directory is removed after collecting results. No existing runner services or host firewall were modified.
+The Linux runs used a dedicated directory and one build job. Their output is retained locally in `blocking-validation.log`, `ping-validation.log`, and `rate-validation.log`, excluded from Git. The runner directory is removed after collecting results. No existing runner services or host firewall were modified.
 
 The Rust suite covers identifier validation, platform neighbor parsing, identification boundaries, shared proxy pacing and real relay cancellation, the firmware's empty-POST contract, native deauthentication acknowledgements, strict blacklist parsing, scoped/idempotent policy planning, unrelated-entry preservation, and consecutive complete radio verification. Incomplete radio observations and intervening associations reset the verification streak.
 
@@ -35,10 +36,19 @@ Hardware: Askey RTF8115VW REV5, firmware `ES_g14.17_RTF_TEF001_V9.17_V034`.
 - The user then requested unblocking. The native app removed that selected entry, verified absence in a fresh SSH session, and confirmed absence again with another authenticated status read. Both-radio readback showed the client associated again.
 - Other blacklist entries and filter mode are preserved by the adapter. Disabling a global whitelist requires an explicit mode-change confirmation, and activating a disabled list with unrelated addresses is refused.
 - The user subsequently requested another block. The optimized macOS executable returned `persistent_block_verified`: the enabled blacklist contained the selected MAC, two consecutive complete reads of both radios showed it absent, and a further authenticated status read confirmed the entry. One firmware-summary read failed during these observations; both radio reads succeeded and were recorded independently. The selected client was left blocked as requested.
+- A later user-requested unblock was verified through a fresh SSH session and another authenticated policy read. The selected client remains unblocked in the current session.
 
 Router policy readback is distinct from traffic measurement. No router reboot was performed, no Ethernet enforcement measurement was taken, and no client-side reconnect/packet trace was captured. Power-cycle durability and every forwarding/offload path remain unverified.
 
 ## Identification and interface checks
+
+The device rows now expose Ban, Unban, Ping, and Speed limit actions. Ban status is read from the router and displayed as Banned, Not banned, or Unknown with a read timestamp. A dedicated refresh reads policy again; failure invalidates the cached status. OpenWrt status concerns Lantern forwarding rules, not every possible external router restriction.
+
+The native macOS ping endpoint and dialog were exercised against observed devices: one returned three ICMP replies and RTT samples; another returned no ICMP replies. The latter is shown as no response, not proof of a ban. The endpoint accepts an observed MAC, resolves its inventory IP server-side, refuses an arbitrary caller-supplied IP, and bounds command duration/output. Native Windows ping execution remains unverified.
+
+The OpenWrt speed-cap adapter was tested with a real isolated Linux bridge, virtual Ethernet pair, and packets matching synthetic client MACs. Ingress upload and egress download counters showed excess-byte drops. A different MAC did not consume the selected client's budget. Tests cover asymmetric caps, numeric unit normalization, idempotent updates, removal after the device disappears, unrelated-table preservation, offload refusal, malformed rule rejection, and ownership rejection. Kernel rule readback is not a physical router throughput benchmark.
+
+The tested nftables version omits netdev device bindings from JSON, so the adapter checks the canonical text device binding as well. Both numeric-priority text bindings and actual JSON rate/burst units are exercised by the namespace integration.
 
 Live identification resolved network-interface manufacturers for globally assigned MACs, declined manufacturer guesses for private MACs, discovered the local Mac's hostname/model/OS, and exposed a conflict between a router label and an mDNS hostname. No live inventory fixture is committed. Firmware fields are populated only from explicit device metadata.
 
@@ -49,6 +59,7 @@ The interface provides in-flight guards, visible operation results, separate one
 - Native Windows execution is unverified.
 - Physical OpenWrt SSH/hostapd interruption requires live hardware validation; namespace firewall validation does not replace it.
 - Movistar power-cycle durability, wired enforcement, client-side connectivity measurement, and continuous monitoring have not been verified.
-- Native process interception, UDP/QUIC shaping, router-level bandwidth controls, native installers, automatic updates, persistent local configuration/audit logs, universal firmware discovery, and performance benchmarks are not implemented.
+- OpenWrt rate caps have isolated kernel validation but no physical OpenWrt gateway validation. No OpenWrt address or SSH access was available in the current network. The connected Movistar firmware was inspected read-only: its priority CLI and advanced queue/classification pages do not expose a verified bandwidth-cap control. No QoS settings were changed there.
+- Native process interception, local proxy UDP/QUIC shaping, smooth queue shaping, Movistar device rate caps, native installers, automatic updates, persistent local configuration/audit logs, universal firmware discovery, and performance benchmarks are not implemented.
 
 Source publication excludes build output, dependencies, test logs, credentials, cookies, label images, private router keys/fingerprints, and live client identifiers. The public IEEE registry is included with attribution.

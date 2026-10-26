@@ -64,3 +64,121 @@ dialog {
   overflow-y: auto;
   scroll-padding-top: 24px;
 }
+.row-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(60px, 1fr));
+  gap: 6px;
+  min-width: 140px;
+}
+.row-speed {
+  grid-column: 1 / -1;
+}
+.access-banned {
+  color: #923343;
+  background: #fff0f0;
+  border-color: #e6bdc2;
+}
+.access-allowed {
+  color: #215b46;
+  background: #e3f3ed;
+  border-color: #a7cebe;
+}
+.access-unknown {
+  color: #775416;
+  background: #fff8e8;
+  border-color: #ead9ad;
+}
+.access-observation {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+@media (max-width: 1050px) {
+  .device-table {
+    white-space: normal;
+  }
+  .device-table thead {
+    display: none;
+  }
+  .device-table tbody {
+    display: block;
+  }
+  .device-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 140px;
+    gap: 6px 14px;
+    padding: 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .device-table tr:last-child {
+    border-bottom: 0;
+  }
+  .device-table td {
+    border: 0;
+    padding: 0;
+    min-width: 0;
+  }
+  .device-table td:nth-child(-n + 4) {
+    grid-column: 1;
+  }
+  .device-table td:last-child {
+    grid-column: 2;
+    grid-row: 1 / span 4;
+    align-self: center;
+  }
+  .device-table .device-name {
+    gap: 8px;
+    overflow-wrap: anywhere;
+  }
+  .device-table .device-initial {
+    display: none;
+  }
+  .device-table .badge {
+    display: inline-block;
+    white-space: normal;
+  }
+}
+.row-actions button {
+  font-size: 11px;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+.ping-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 24px 0;
+}
+.ping-metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.ping-metrics strong {
+  font-size: 20px;
+  font-weight: 600;
+}
+.ping-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0;
+}
+.ping-samples span {
+  padding: 8px 12px;
+  background: #eef5f7;
+  border-radius: 5px;
+  font:
+    12px ui-monospace,
+    monospace;
+}
+@media (max-width: 480px) {
+  .ping-metrics {
+    gap: 8px;
+  }
+  .ping-metrics strong {
+    font-size: 16px;
+  }
+}
